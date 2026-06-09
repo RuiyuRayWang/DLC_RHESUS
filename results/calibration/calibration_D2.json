@@ -1,0 +1,186 @@
+{
+  "camera": "D2",
+  "quadrant_label": "top-right",
+  "quadrant_x_cm": [
+    161,
+    322
+  ],
+  "quadrant_y_cm": [
+    0,
+    161
+  ],
+  "arena_size_cm": [
+    322,
+    322
+  ],
+  "cage_height_cm": 105,
+  "video_path": "/home/luolab/PROJECTS/PAL_ENHANCER/data/oft_rhp/H1705011/2026-05-25/D02_20260525161934.mp4",
+  "frame_number": 600,
+  "image_size_wh": [
+    3840,
+    2160
+  ],
+  "labeled_points": [
+    {
+      "name": "Floor TL (161,0)",
+      "world_cm": [
+        161,
+        0,
+        0
+      ],
+      "pixel": [
+        1234,
+        488
+      ],
+      "required": true
+    },
+    {
+      "name": "Floor TR (322,0)",
+      "world_cm": [
+        322,
+        0,
+        0
+      ],
+      "pixel": [
+        2468,
+        468
+      ],
+      "required": true
+    },
+    {
+      "name": "Floor BR (322,161)",
+      "world_cm": [
+        322,
+        161,
+        0
+      ],
+      "pixel": [
+        2485,
+        1740
+      ],
+      "required": true
+    },
+    {
+      "name": "Floor BL (161,161)",
+      "world_cm": [
+        161,
+        161,
+        0
+      ],
+      "pixel": [
+        1280,
+        1771
+      ],
+      "required": true
+    },
+    {
+      "name": "Top   TL (161,0)",
+      "world_cm": [
+        161,
+        0,
+        105
+      ],
+      "pixel": [
+        994,
+        225
+      ],
+      "required": false
+    },
+    {
+      "name": "Top   TR (322,0)",
+      "world_cm": [
+        322,
+        0,
+        105
+      ],
+      "pixel": [
+        2748,
+        211
+      ],
+      "required": false
+    },
+    {
+      "name": "Top   BR (322,161)",
+      "world_cm": [
+        322,
+        161,
+        105
+      ],
+      "pixel": [
+        2762,
+        2037
+      ],
+      "required": false
+    },
+    {
+      "name": "Top   BL (161,161)",
+      "world_cm": [
+        161,
+        161,
+        105
+      ],
+      "pixel": [
+        1057,
+        2094
+      ],
+      "required": false
+    }
+  ],
+  "floor_homography": [
+    [
+      0.12566641159303205,
+      -0.007386429826842281,
+      6.644725935350949
+    ],
+    [
+      0.0019495268170541806,
+      0.12028580461224452,
+      -61.105188743020136
+    ],
+    [
+      -7.564922925371379e-06,
+      -1.76222688253652e-05,
+      1.0
+    ]
+  ],
+  "floor_reproj_error_cm": 4.851878806690175e-14,
+  "solvepnp": {
+    "camera_matrix": [
+      [
+        3840.0,
+        0.0,
+        1920.0
+      ],
+      [
+        0.0,
+        3840.0,
+        1080.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "dist_coeffs": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "rvec": [
+      -0.0592685142258485,
+      -0.024073022611925832,
+      3.119793050085216
+    ],
+    "tvec": [
+      248.92404178346146,
+      70.80632161688885,
+      -450.8257882181043
+    ],
+    "reprojection_error_px": 62.65648578992201,
+    "n_points": 8
+  },
+  "saved_at": "2026-06-09T14:00:46.750607"
+}

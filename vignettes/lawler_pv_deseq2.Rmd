@@ -1,0 +1,259 @@
+---
+title: "Lawler PV Analysis with DESeq2"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## Load Libraries
+
+```{r load-libraries}
+library(DESeq2)
+library(ggplot2)
+library(dplyr)
+library(pheatmap)
+library(RColorBrewer)
+# library(plotly)
+```
+
+## Load Data
+
+```{r load-data}
+data_file <- '../data/Lawler_2020/GSE157359_rna_fullCountMatrix.txt.gz'
+meta_file <- '../data/Lawler_2020/processed/lawler_10x_format/metadata.csv'
+
+# Load count matrix
+count_data <- read.table(data_file, header = TRUE, row.names = 1, sep = '\t')
+
+# Load metadata
+metadata <- read.csv(meta_file, row.names = 1)
+
+# Ensure count data and metadata have matching samples
+common_samples <- intersect(colnames(count_data), rownames(metadata))
+count_data <- count_data[, common_samples]
+metadata <- metadata[common_samples, ]
+
+# Convert count data to integer matrix (required for DESeq2)
+count_matrix <- as.matrix(count_data)
+count_matrix <- apply(count_matrix, 2, as.integer)
+rownames(count_matrix) <- rownames(count_data)
+
+print(paste("Number of genes:", nrow(count_matrix)))
+print(paste("Number of samples:", ncol(count_matrix)))
+```
+
+## Data Overview
+
+```{r data-overview}
+# Display metadata structure
+head(metadata)
+
+# Sample distribution
+table(metadata$pv_status, metadata$brain_region)
+table(metadata$treatment, metadata$brain_region)
+```
+
+## Create DESeq2 Object
+
+```{r create-deseq-object}
+if (!file.exists("../data/Lawler_2020/processed/DDS_GSE157359_rna_fullCountMatrix.rds")){
+  
+  # Create DESeq2 dataset object
+  # Using a simple design for exploratory analysis
+  dds <- DESeqDataSetFromMatrix(
+    countData = count_matrix,
+    colData = metadata,
+    design = ~ brain_region + treatment + pv_status
+  )
+
+  # Filter low count genes (keep genes with at least 10 reads in at least 3 samples)
+  keep <- rowSums(counts(dds) >= 10) >= 3
+  dds <- dds[keep, ]
+  
+} else {
+  
+  # Read from previously back-up'ed object
+  dds <- readRDS("../data/Lawler_2020/processed/DDS_GSE157359_rna_fullCountMatrix.rds")
+  
+}
+
+print(paste("Genes retained after filtering:", nrow(dds)))
+```
+
+## Exploratory Data Analysis
+
+### Library Size Distribution
+
+```{r library-sizes}
+# Calculate library sizes
+lib_sizes <- colSums(counts(dds))
+metadata$library_size <- lib_sizes
+
+# Plot library sizes
+ggplot(metadata, aes(x = reorder(rownames(metadata), library_size), y = library_size)) +
+  geom_col(aes(fill = brain_region)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Library Sizes by Sample",
+       x = "Samples", y = "Total Counts") +
+  scale_fill_brewer(type = "qual", palette = "Set2")
+```
+
+### Variance Stabilizing Transformation
+
+```{r vst-transformation}
+# Apply variance stabilizing transformation
+vsd <- vst(dds, blind = FALSE)
+
+# Extract transformed counts
+vst_counts <- assay(vsd)
+```
+
+### Sample Distance Heatmap
+
+```{r sample-distances, fig.width=8, fig.height=8}
+# Calculate sample distances
+sampleDists <- dist(t(vst_counts))
+sampleDistMatrix <- as.matrix(sampleDists)
+
+# Create annotation for heatmap
+annotation_col <- data.frame(
+  PV_Status = metadata$pv_status,
+  Brain_Region = metadata$brain_region,
+  Treatment = metadata$treatment,
+  row.names = rownames(metadata)
+)
+
+# Plot heatmap
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         annotation_col = annotation_col,
+         main = "Sample Distance Heatmap")
+```
+
+### Principal Component Analysis
+
+```{r pca-analysis, fig.width=6.5, fig.height=3.4}
+# Perform PCA
+pca_data <- plotPCA(vsd, intgroup = c("pv_status", "brain_region", "treatment"), returnData = TRUE)
+percentVar <- round(100 * attr(pca_data, "percentVar"))
+
+# # Basic PCA plot with ellipses around brain regions
+# p1 <- ggplot(pca_data, aes(PC1, PC2)) +
+#   stat_ellipse(aes(color = brain_region), type = "norm", linetype = 2, size = 1, alpha = 0.5) +
+#   geom_point(aes(color = brain_region, shape = pv_status), size = 3) +
+#   labs(title = "PCA Plot - Brain Region and PV Status",
+#        x = paste0("PC1: ", percentVar[1], "% variance"),
+#        y = paste0("PC2: ", percentVar[2], "% variance")) +
+#   theme_minimal() +
+#   scale_color_brewer(type = "qual", palette = "Set1") +
+#   theme(legend.position = "right")
+# 
+# print(p1)
+# 
+# # PCA plot with treatment and ellipses around brain regions
+# p2 <- ggplot(pca_data, aes(PC1, PC2)) +
+#   stat_ellipse(aes(color = brain_region), type = "norm", linetype = 2, size = 1, alpha = 0.5) +
+#   geom_point(aes(color = treatment, shape = brain_region), size = 3) +
+#   labs(title = "PCA Plot - Treatment and Brain Region",
+#        x = paste0("PC1: ", percentVar[1], "% variance"),
+#        y = paste0("PC2: ", percentVar[2], "% variance")) +
+#   theme_minimal() +
+#   scale_color_manual(values = c("DD" = "red", "Sham" = "blue"))
+# 
+# print(p2)
+```
+
+```{r}
+# Combined PCA plot with ellipses
+p3 <- ggplot(pca_data, aes(PC1, PC2)) +
+  geom_point(aes(color = interaction(pv_status, treatment), shape = brain_region), size = 3) +
+  scale_color_manual(values = c(brewer.pal(n=12, name="Paired")[c(4,6,3,5)],"#00929b","#7a1290","#ff4b00")) +
+  stat_ellipse(aes(color = brain_region), type = "norm", linetype = 2, size = 1, alpha = 0.5) +
+  guides(shape = "none") +
+  labs(title = "PV Status × Treatment × Brain Region",
+       x = paste0("PC1: ", percentVar[1], "% variance"),
+       y = paste0("PC2: ", percentVar[2], "% variance")) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+p3
+```
+
+```{r}
+ggsave(
+  filename = "lawler_pv_PCA.svg",
+  plot = p3,
+  path = "../figures/label_transfer/",
+  width = 8, height = 5,
+  dpi = 600
+)
+```
+
+### Interactive PCA Plot
+
+```{r interactive-pca}
+# # Create interactive PCA plot
+# p_interactive <- plot_ly(pca_data, 
+#                         x = ~PC1, y = ~PC2,
+#                         color = ~brain_region,
+#                         symbol = ~pv_status,
+#                         text = ~paste("Sample:", name, 
+#                                      "<br>Brain Region:", brain_region,
+#                                      "<br>PV Status:", pv_status,
+#                                      "<br>Treatment:", treatment),
+#                         hoverinfo = 'text') %>%
+#   add_markers(size = I(8)) %>%
+#   layout(title = "Interactive PCA Plot",
+#          xaxis = list(title = paste0("PC1: ", percentVar[1], "% variance")),
+#          yaxis = list(title = paste0("PC2: ", percentVar[2], "% variance")))
+# 
+# p_interactive
+```
+
+### Top Variable Genes Heatmap
+
+```{r variable-genes-heatmap, fig.width=8, fig.height=10}
+# Select top 50 most variable genes
+topVarGenes <- head(order(rowVars(vst_counts), decreasing = TRUE), 50)
+
+# Create heatmap of top variable genes
+pheatmap(vst_counts[topVarGenes, ],
+         scale = "row",
+         annotation_col = annotation_col,
+         show_rownames = FALSE,
+         main = "Top 50 Most Variable Genes")
+```
+
+## Summary
+
+```{r summary}
+cat("Data Summary:\n")
+cat("- Total genes after filtering:", nrow(dds), "\n")
+cat("- Total samples:", ncol(dds), "\n")
+cat("- Brain regions:", paste(unique(metadata$brain_region), collapse = ", "), "\n")
+cat("- Treatments:", paste(unique(metadata$treatment), collapse = ", "), "\n")
+cat("- PV status groups:", paste(unique(metadata$pv_status), collapse = ", "), "\n")
+cat("\nPCA Results:\n")
+cat("- PC1 explains", percentVar[1], "% of variance\n")
+cat("- PC2 explains", percentVar[2], "% of variance\n")
+cat("- Total variance explained by PC1+PC2:", sum(percentVar[1:2]), "%\n")
+```
+
+## Save Results
+
+```{r save-results}
+# Save the dds object to disk
+saveRDS(dds, "../data/Lawler_2020/processed/DDS_GSE157359_rna_fullCountMatrix.rds")
+
+cat("Results saved to results/ directory\n")
+```
+
+## Session Info
+
+```{r session-info}
+sessionInfo()
+```
