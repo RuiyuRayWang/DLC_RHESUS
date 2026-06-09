@@ -1,6 +1,3 @@
-# Probably deprecated
-# See `vignettes/`
-
 library(Seurat)
 library(SeuratDisk)
 library(tidyverse)
@@ -43,12 +40,13 @@ query <- AddMetaData(query, metadata = predictions)
 
 query@meta.data |> View()
 
+# SaveH5Seurat(object = query, filename = 'data/Lawler_2020/processed/query_with_preds.h5Seurat', overwrite = T)
+# SaveH5Seurat(object = reference, filename = 'data/nemo_archive_processed/ref_aibs_STR_PAL.h5Seurat', overwrite = T)  # Seurat v5 incompatible with SeuratDisk?
 saveRDS(query, 'data/Lawler_2020/processed/query_with_preds.rds')
-saveRDS(reference, 'data/nemo_archive_processed/ref_aibs_STR_PAL.h5Seurat')
+# saveRDS(reference, 'data/nemo_archive_processed/ref_aibs_STR_PAL.h5Seurat')
 
 # ==============================================================================
 
-query <- readRDS('data/Lawler_2020/processed/query_with_preds.rds')
 reference_057 <- readRDS('data/nemo_archive_processed/reference_057.rds')
 
 # Subsetting 057
@@ -92,37 +90,19 @@ SaveH5Seurat(object = reference_057, filename = 'data/nemo_archive_processed/ref
 
 # ==============================================================================
 
-query <- readRDS('data/Lawler_2020/processed/lawler_query.rds')
+reference <- readRDS('data/nemo_archive_processed/reference_STR_PAL.rds')
 
-
-# ==============================================================================
-
-# reference <- readRDS('data/nemo_archive_processed/reference_STR_PAL.rds')
-# 
-# Idents(reference) <- "supertype"
-# mks.057.by_supertype <- FindAllMarkers(reference, only.pos = TRUE)
-# write_csv(mks.057.by_cluster, file = "results/STR-PAL_mks_057_by_cluster.csv")
-# 
-# Idents(reference) <- "cluster"
-# mks.057.by_cluster <- FindAllMarkers(reference, only.pos = TRUE)
-# write_csv(mks.057.by_cluster, file = "results/STR-PAL_mks_057_by_cluster.csv")
+Idents(reference) <- "cluster"
+mks.057.by_cluster <- FindAllMarkers(reference, only.pos = TRUE)
+write_csv(mks.057.by_cluster, file = "results/STR-PAL_mks_057_by_cluster.csv")
 
 # ==============================================================================
 
 reference_057 <- readRDS('data/nemo_archive_processed/reference_057.rds')
 
-library(tidydr)
-Idents(reference_057) <- "cluster"
 DimPlot(reference_057, cells.highlight = WhichCells(reference_057, idents = '0892 NDB-SI-MA-STRv Lhx8 Gaba_4')) + 
-  theme_dr(xlength = 0.18, ylength = 0.2) +
-  ggtitle('0892 NDB-SI-MA-STRv Lhx8 Gaba_4') + 
-  xlab("UMAP 1") + ylab("UMAP 2") +
-  theme(
-    title = element_text(size = 12),
-    axis.title = element_text(hjust = 0),
-    panel.grid = element_blank()
-    ) +
-  NoLegend()
+  NoLegend() + 
+  ggtitle('0892 NDB-SI-MA-STRv Lhx8 Gaba_4') + theme(title = element_text(size = 10))
 
 top_90 <- mks.057.by_cluster |> 
   filter(cluster == "0892 NDB-SI-MA-STRv Lhx8 Gaba_4") |> 
@@ -142,13 +122,6 @@ FeaturePlot(reference_057, features = top_90[82:90])
 mks_use <- c('Pvalb', 'Gpr174', 'Gpr139', "Adamts19", "P2ry10b", 'Npas1', 'Isl1', 'Lhx6', 'Lhx8')
 FeaturePlot(reference_057, features = mks_use)
 FeaturePlot(reference_057, features = 'Gm2115')
-
-FeaturePlot(reference_057, 
-            features = c("Pvalb","Gpr174","Gm2115","Gpr139","P2ry10b","Adamts19"), pt.size = .1
-            ) & 
-  NoAxes() &
-  theme(plot.title = element_text(size = 15),
-        legend.position = "none")
 
 # Try to investigate what other cell markers may be
 cells.top_left <- CellSelector(DimPlot(reference_057))

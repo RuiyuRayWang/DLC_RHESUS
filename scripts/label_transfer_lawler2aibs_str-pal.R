@@ -1,4 +1,3 @@
-# Re-analysis of GSE157359 to elucidate the identity of GPe-Pvalb population in AIBS taxonomy
 library(Seurat)
 library(SeuratDisk)
 
@@ -42,5 +41,3 @@ query@meta.data |> View()
 
 saveRDS(query, 'data/Lawler_2020/processed/query_with_preds.rds')
 saveRDS(reference, 'data/nemo_archive_processed/reference_STR_PAL.rds')
-
-
