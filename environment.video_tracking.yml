@@ -1,0 +1,15 @@
+name: video_tracking
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy>=1.24
+  - pandas>=2.0
+  - opencv>=4.8
+  - ffmpeg
+  - matplotlib>=3.7
+  - seaborn>=0.13
+  - scikit-image>=0.21
+  - tqdm>=4.66
+  - jupyterlab>=4
+  - ipykernel>=6

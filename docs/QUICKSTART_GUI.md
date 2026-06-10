@@ -2,13 +2,21 @@
 
 **⚠️ IMPORTANT:** These GUI tools must be run **directly in your terminal**, not through scripts or automation tools.
 
+## Step 0: Create the environment (first time only)
+
+```bash
+cd /Users/ray/PROJECTS/PAL_ENHANCER
+bash scripts/setup_video_tracking_env.sh
+conda activate video_tracking
+```
+
 ## Step 1: Camera Calibration
 
 Open a terminal and run:
 
 ```bash
-cd /home/luolab/PROJECTS/PAL_ENHANCER
-conda activate deeplabcut
+cd /Users/ray/PROJECTS/PAL_ENHANCER
+conda activate video_tracking
 python scripts/calibrate_cameras.py --camera D2 --frame-sec 30
 ```
 
@@ -47,12 +55,12 @@ Optionally label 4 more points on the cage top (same x,y positions, z=105cm) for
 After calibration, label monkey positions:
 
 ```bash
-cd /home/luolab/PROJECTS/PAL_ENHANCER
-conda activate deeplabcut
-python scripts/manual_labeler.py --camera D2 --sample-every 20
+cd /Users/ray/PROJECTS/PAL_ENHANCER
+conda activate video_tracking
+python scripts/manual_labeler.py --camera D2
 ```
 
-This will sample every 20th frame (default stride = 20, which gives ~1 frame/second at 20 fps).
+This uses the default sampling rate of every 20th frame, which is about 1 frame/second at 20 fps.
 
 To change the sampling rate:
 ```bash
@@ -108,7 +116,7 @@ This will:
 This means the script was run in a subprocess (e.g., via `conda run`, piped, or in a bash script).
 
 **Solution:** Type the commands **directly in your terminal**, don't:
-- Use `conda run -n deeplabcut python ...`
+- Use `conda run -n video_tracking python ...`
 - Pipe output: `python script.py | tee log.txt`
 - Run in a shell script with `bash -c "..."`
 
@@ -123,7 +131,7 @@ ssh -X username@server  # Enable X11 forwarding
 
 Run the diagnostic:
 ```bash
-conda activate deeplabcut
+conda activate video_tracking
 python scripts/check_opencv_display.py
 ```
 

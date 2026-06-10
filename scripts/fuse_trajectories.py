@@ -16,7 +16,7 @@ Outputs:
     results/oft_analysis/<monkey>/<date>/trajectory_summary.json
 
 Usage:
-    conda activate deeplabcut
+    conda activate video_tracking
     python scripts/fuse_trajectories.py
     python scripts/fuse_trajectories.py --monkey H1705011 --date 2026-05-25
     python scripts/fuse_trajectories.py --help
@@ -39,8 +39,9 @@ SESSION_DATE = '2026-05-25'
 FPS          = 20.0
 CAMERAS      = ['D1', 'D2', 'D3', 'D4']
 
-RESULTS_BASE = Path('/home/luolab/PROJECTS/PAL_ENHANCER/results/oft_analysis')
-CAL_BASE     = Path('/home/luolab/PROJECTS/PAL_ENHANCER/results/calibration')
+PROJECT_ROOT  = Path(__file__).resolve().parents[1]
+RESULTS_BASE = PROJECT_ROOT / 'results' / 'oft_analysis'
+CAL_BASE     = PROJECT_ROOT / 'results' / 'calibration'
 
 # Interpolation: fill gaps ≤ this many frames (0 = disabled)
 MAX_INTERP_FRAMES = 40   # 2 s at 20 fps

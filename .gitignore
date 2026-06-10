@@ -1,6 +1,28 @@
 # ==============================================================================
-# PAL_ENHANCER Project .gitignore
+# PAL_ENHANCER - OFT Video Analysis Pipeline .gitignore
 # ==============================================================================
+
+# This repository focuses on the OFT video analysis pipeline only.
+# All other project content (manuscripts, R analysis, design files) is excluded.
+
+# Non-OFT content - exclude entire directories
+# ------------------------------------------------------------------------------
+manuscript/
+design/
+figures/
+analysis/
+vignettes/
+notebook/
+notebooks/
+tmp/
+
+# R project files
+.Rhistory
+.Rapp.history
+.RData
+.Ruserdata
+.Rproj.user/
+*.Rproj
 
 # Large data files - exclude but keep folder structure
 # ------------------------------------------------------------------------------
@@ -14,35 +36,17 @@
 *.mov
 *.mkv
 
-# Data directory - exclude all content but keep folder with README
+# Data directory - exclude all content but keep README
 data/*
 !data/README.md
 !data/.gitkeep
 
-# Large intermediate results - exclude but keep important calibration files
-results/oft_analysis/
-results/2025-*/
-results/*.csv
-results/**/*.csv
-!results/calibration/*.json
-# Calibration frame PNGs are large (12-13MB each at 4K), regenerate if needed
-results/calibration/*.png
+# Results - exclude all generated results
+results/
+!results/.gitkeep
 
-# Model files (large)
+# Model files
 models/
-tmp/
-
-# Figures - can be regenerated
-figures/*
-!figures/README.md
-!figures/.gitkeep
-
-# Notebooks - exclude all notebooks
-*.ipynb
-notebooks/**/*.png
-notebooks/**/*.jpg
-notebooks/**/*.svg
-notebooks/**/checkpoints/
 
 # ==============================================================================
 # Python

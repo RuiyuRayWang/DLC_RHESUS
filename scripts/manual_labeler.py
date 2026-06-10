@@ -6,7 +6,7 @@ Opens an OpenCV window showing one frame at a time from a selected camera.
 Left-click on the monkey to record its centroid. Clicking auto-advances.
 
 Usage:
-    conda activate deeplabcut
+    conda activate video_tracking
     python scripts/manual_labeler.py               # interactive camera select
     python scripts/manual_labeler.py --camera D3
     python scripts/manual_labeler.py --video path/to/video.mp4 --camera D1
@@ -33,8 +33,9 @@ from typing import Dict, Optional, Tuple
 
 # ── Defaults / constants ───────────────────────────────────────────────────────
 
-VIDEO_BASE = Path('/home/luolab/PROJECTS/PAL_ENHANCER/data/oft_rhp/H1705011/2026-05-25')
-OUTPUT_BASE = Path('/home/luolab/PROJECTS/PAL_ENHANCER/results/oft_analysis/H1705011/2026-05-25')
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+VIDEO_BASE = PROJECT_ROOT / 'data' / 'oft_rhp' / 'H1705011' / '2026-05-25'
+OUTPUT_BASE = PROJECT_ROOT / 'results' / 'oft_analysis' / 'H1705011' / '2026-05-25'
 
 # Camera → video file prefix and quadrant label
 CAMERA_INFO = {

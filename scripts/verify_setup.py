@@ -9,10 +9,12 @@ import numpy as np
 from pathlib import Path
 import sys
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 def verify_video_loading():
     """Verify we can load and process HEVC videos."""
     
-    video_dir = Path('/home/luolab/PROJECTS/PAL_ENHANCER/data/oft_rhp/134569R')
+    video_dir = PROJECT_ROOT / 'data' / 'oft_rhp' / '134569R'
     test_video = list(video_dir.glob('*.mp4'))[0]
     
     print("="*70)
@@ -109,7 +111,7 @@ if __name__ == '__main__':
     except ImportError:
         print("❌ ERROR: OpenCV not installed")
         print("\nInstall with:")
-        print("  conda activate deeplabcut")
+        print("  conda activate video_tracking")
         print("  conda install -c conda-forge opencv -y")
         sys.exit(1)
     

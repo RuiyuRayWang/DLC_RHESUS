@@ -16,30 +16,28 @@ if ! command -v conda &> /dev/null; then
 fi
 
 # Check if environment exists
-if ! conda env list | grep -q "deeplabcut"; then
-    echo "❌ ERROR: 'deeplabcut' conda environment not found."
+if ! conda env list | grep -q "video_tracking"; then
+    echo "❌ ERROR: 'video_tracking' conda environment not found."
     echo "   Create it with:"
-    echo "   conda create -n deeplabcut python=3.10 -y"
-    echo "   conda activate deeplabcut"
-    echo "   conda install -c conda-forge ffmpeg opencv pandas matplotlib -y"
+    echo "   bash scripts/setup_video_tracking_env.sh"
     exit 1
 fi
 
 # Check if environment is activated
-if [[ "$CONDA_DEFAULT_ENV" != "deeplabcut" ]]; then
-    echo "⚠️  WARNING: 'deeplabcut' environment is NOT activated."
+if [[ "$CONDA_DEFAULT_ENV" != "video_tracking" ]]; then
+    echo "⚠️  WARNING: 'video_tracking' environment is NOT activated."
     echo ""
     echo "   GUI tools require an ACTIVATED conda environment (not 'conda run')."
     echo "   This is due to Qt6 threading limitations."
     echo ""
     echo "   Please run:"
-    echo "   conda activate deeplabcut"
+    echo "   conda activate video_tracking"
     echo "   $0"
     echo ""
     exit 1
 fi
 
-echo "✅ Conda environment 'deeplabcut' is activated."
+echo "✅ Conda environment 'video_tracking' is activated."
 echo ""
 
 # Show available commands
@@ -53,7 +51,7 @@ echo "2. Camera Calibration (all cameras):"
 echo "   python scripts/calibrate_cameras.py --all --frame-sec 30"
 echo ""
 echo "3. Manual Labeling (one camera):"
-echo "   python scripts/manual_labeler.py --camera D3 --frames 100 --stride 20"
+echo "   python scripts/manual_labeler.py --camera D3"
 echo ""
 echo "4. Trajectory Fusion (no GUI, processes labeled data):"
 echo "   python scripts/fuse_trajectories.py --monkey H1705011 --date 2026-05-25"
@@ -81,11 +79,9 @@ case $choice in
         ;;
     3)
         read -p "Enter camera (D1-D4): " cam
-        read -p "Enter number of frames [100]: " nframes
-        nframes=${nframes:-100}
-        read -p "Enter stride [20]: " stride
+        read -p "Enter sample-every stride [20]: " stride
         stride=${stride:-20}
-        python scripts/manual_labeler.py --camera "$cam" --frames "$nframes" --stride "$stride"
+        python scripts/manual_labeler.py --camera "$cam" --sample-every "$stride"
         ;;
     4)
         read -p "Enter monkey ID [H1705011]: " monkey
