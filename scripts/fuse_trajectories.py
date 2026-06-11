@@ -39,6 +39,14 @@ SESSION_DATE = '2026-05-25'
 FPS          = 20.0
 CAMERAS      = ['D1', 'D2', 'D3', 'D4']
 
+# Camera quadrant bounds (cm) - for filtering out-of-bounds projections
+CAMERA_QUADRANTS = {
+    'D1': {'x_min': 0,   'x_max': 161, 'y_min': 0,   'y_max': 161},  # top-left
+    'D2': {'x_min': 161, 'x_max': 322, 'y_min': 0,   'y_max': 161},  # top-right
+    'D3': {'x_min': 0,   'x_max': 161, 'y_min': 161, 'y_max': 322},  # bottom-left
+    'D4': {'x_min': 161, 'x_max': 322, 'y_min': 161, 'y_max': 322},  # bottom-right
+}
+
 PROJECT_ROOT  = Path(__file__).resolve().parents[1]
 RESULTS_BASE = PROJECT_ROOT / 'results' / 'oft_analysis'
 CAL_BASE     = PROJECT_ROOT / 'results' / 'calibration'
@@ -65,121 +73,295 @@ def pixel_to_cm(pixel_xy, H: np.ndarray):
 
 # ── Load calibrations ──────────────────────────────────────────────────────────
 
-def load_homographies(cal_dir: Path, cameras: List[str]) -> Dict[str, Optional[np.ndarray]]:
-    """Load floor homography matrix for each camera. Returns None if not available."""
+def load_homographies(cal_dir: Path, cameras: List[str]):
+    """
+    Load floor homography matrix and calibrated pixel bounds for each camera.
+    
+    Returns:
+        Tuple of (Hs, pixel_bounds) where:
+        - Hs: Dict[str, Optional[np.ndarray]] - homography matrices
+        - pixel_bounds: Dict[str, Optional[dict]] - pixel bounds with x_min, x_max, y_min, y_max
+    """
     Hs: Dict[str, Optional[np.ndarray]] = {}
+    pixel_bounds: Dict[str, Optional[dict]] = {}
+    
     for cam in cameras:
         cal_file = cal_dir / f'calibration_{cam}.json'
         if not cal_file.exists():
             print(f"  ⚠  No calibration file for {cam} ({cal_file.name}) — camera will be skipped")
             Hs[cam] = None
+            pixel_bounds[cam] = None
             continue
+        
         with open(cal_file) as f:
             data = json.load(f)
+        
         H_raw = data.get('floor_homography')
         if H_raw is None:
             print(f"  ⚠  Calibration for {cam} has no floor_homography — camera will be skipped")
             Hs[cam] = None
+            pixel_bounds[cam] = None
             continue
+        
         Hs[cam] = np.array(H_raw, dtype=np.float64)
+        
+        # Extract calibrated pixel bounds from floor corner points
+        floor_pts = [p for p in data['labeled_points'] 
+                    if p.get('pixel') and p['world_cm'][2] == 0]
+        if floor_pts:
+            xs = [p['pixel'][0] for p in floor_pts]
+            ys = [p['pixel'][1] for p in floor_pts]
+            pixel_bounds[cam] = {
+                'x_min': min(xs),
+                'x_max': max(xs),
+                'y_min': min(ys),
+                'y_max': max(ys),
+            }
+        else:
+            pixel_bounds[cam] = None
+        
         err = data.get('floor_reproj_error_cm', float('nan'))
         print(f"  ✓  {cam}: homography loaded  (reprojection error: {err:.2f} cm)")
-    return Hs
+    
+    return Hs, pixel_bounds
 
 
 # ── Load labels ────────────────────────────────────────────────────────────────
 
 def load_labels(labels_dir: Path, cameras: List[str],
-                fps: float = FPS) -> Dict[str, pd.DataFrame]:
-    """Load per-camera label CSVs. Returns empty DataFrame for missing cameras."""
-    dfs: Dict[str, pd.DataFrame] = {}
+                fps: float = FPS) -> List[pd.DataFrame]:
+    """
+    Load all per-camera label CSVs (handles multiple videos per camera).
+    Returns list of DataFrames, one per label CSV file.
+    """
+    from datetime import datetime
+    import re
+    
+    dfs: List[pd.DataFrame] = []
+    
     for cam in cameras:
-        csv_file = labels_dir / f'labels_{cam}.csv'
-        if not csv_file.exists():
-            print(f"  ⚠  No labels for {cam} ({csv_file.name})")
-            dfs[cam] = pd.DataFrame()
+        # Find all label CSVs for this camera: labels_D03.csv, labels_D03_170340.csv, etc.
+        # Camera names are D1-D4 but filenames use D01-D04 (with leading zero)
+        cam_num = cam[1]  # '1', '2', '3', '4'
+        pattern = f'labels_D0{cam_num}*.csv'
+        csv_files = sorted(labels_dir.glob(pattern))
+        
+        if not csv_files:
+            print(f"  ⚠  No labels for {cam}")
             continue
-        df = pd.read_csv(csv_file)
-        # Keep only rows where monkey is visible
-        if 'monkey_visible' in df.columns:
-            df = df[df['monkey_visible'] == True].copy()
-        else:
-            # Legacy format: filter out sentinel values
-            df = df[(df['centroid_x'] != NO_MONKEY_SENTINEL)].copy()
-        df['camera'] = cam
-        print(f"  ✓  {cam}: {len(df)} visible-monkey frames loaded")
-        dfs[cam] = df
+        
+        for csv_file in csv_files:
+            df = pd.read_csv(csv_file)
+            
+            # Keep only rows where monkey is visible
+            if 'monkey_visible' in df.columns:
+                df = df[df['monkey_visible'] == True].copy()
+            else:
+                # Legacy format: filter out sentinel values
+                df = df[(df['centroid_x'] != NO_MONKEY_SENTINEL)].copy()
+            
+            if df.empty:
+                continue
+            
+            # Compute absolute timestamp for each frame
+            if 'video_timestamp' in df.columns:
+                # New format: video_timestamp already in CSV
+                base_time = pd.to_datetime(df['video_timestamp'].iloc[0])
+            else:
+                # Legacy format: try to parse from filename or video_file column
+                if 'video_file' in df.columns:
+                    video_name = df['video_file'].iloc[0]
+                else:
+                    # Fall back to CSV filename
+                    video_name = csv_file.name
+                
+                match = re.search(r'D0[1-4]_(\d{14})', video_name)
+                if match:
+                    ts_str = match.group(1)
+                    base_time = datetime.strptime(ts_str, '%Y%m%d%H%M%S')
+                else:
+                    print(f"  ⚠  Could not parse timestamp from {csv_file.name}, skipping")
+                    continue
+            
+            # Add absolute timestamp column
+            df['absolute_time'] = base_time + pd.to_timedelta(df['time_sec'], unit='s')
+            df['camera'] = cam
+            
+            print(f"  ✓  {cam} ({csv_file.name}): {len(df)} frames, start={base_time.strftime('%H:%M:%S')}")
+            dfs.append(df)
+    
     return dfs
 
 
 # ── Convert pixel → cm per camera ─────────────────────────────────────────────
 
-def apply_homographies(label_dfs: Dict[str, pd.DataFrame],
-                       Hs: Dict[str, Optional[np.ndarray]]) -> pd.DataFrame:
+def apply_homographies(label_dfs: List[pd.DataFrame],
+                       Hs: Dict[str, Optional[np.ndarray]],
+                       pixel_bounds: Dict[str, Optional[dict]],
+                       filter_out_of_bounds: bool = True,
+                       pixel_margin: float = 100.0,
+                       world_margin_cm: float = 30.0) -> pd.DataFrame:
     """
     For each labeled frame convert pixel centroid → real-world cm.
+    
+    Filters labels that fall outside the calibrated pixel region to prevent
+    homography extrapolation errors.
+    
+    Args:
+        label_dfs: List of label DataFrames
+        Hs: Dict of homography matrices per camera
+        pixel_bounds: Dict of calibrated pixel bounds per camera
+        filter_out_of_bounds: If True, reject labels outside calibrated region
+        pixel_margin: Pixels beyond calibration bounds to allow (for edge tolerance)
+        world_margin_cm: Additional cm beyond quadrant bounds (for boundary overlap)
+    
     Returns a DataFrame with columns:
-        video_frame, time_sec, camera, x_cm, y_cm
+        absolute_time, camera, x_cm, y_cm, pixel_x, pixel_y
     """
     rows = []
-    for cam, df in label_dfs.items():
-        H = Hs.get(cam)
-        if H is None or df.empty:
+    n_filtered_pixel = 0
+    n_filtered_world = 0
+    n_clipped = 0
+    
+    for df in label_dfs:
+        if df.empty:
             continue
+        
+        cam = df['camera'].iloc[0]
+        H = Hs.get(cam)
+        if H is None:
+            continue
+        
+        # Get pixel bounds and world quadrant bounds for this camera
+        pbounds = pixel_bounds.get(cam)
+        wbounds = CAMERA_QUADRANTS.get(cam)
+        
         for _, row in df.iterrows():
-            x_cm, y_cm = pixel_to_cm((row['centroid_x'], row['centroid_y']), H)
+            px, py = row['centroid_x'], row['centroid_y']
+            
+            # Filter based on pixel coordinates BEFORE projection
+            if filter_out_of_bounds and pbounds:
+                if not (pbounds['x_min'] - pixel_margin <= px <= pbounds['x_max'] + pixel_margin and
+                        pbounds['y_min'] - pixel_margin <= py <= pbounds['y_max'] + pixel_margin):
+                    n_filtered_pixel += 1
+                    continue
+            
+            # Apply homography
+            x_cm, y_cm = pixel_to_cm((px, py), H)
+            
+            # Secondary filter: world coordinate bounds (for boundary overlap)
+            if filter_out_of_bounds and wbounds:
+                x_min = wbounds['x_min'] - world_margin_cm
+                x_max = wbounds['x_max'] + world_margin_cm
+                y_min = wbounds['y_min'] - world_margin_cm
+                y_max = wbounds['y_max'] + world_margin_cm
+                
+                if not (x_min <= x_cm <= x_max and y_min <= y_cm <= y_max):
+                    n_filtered_world += 1
+                    continue
+            
+            # Clip to arena bounds (head can extend beyond floor edge)
+            x_cm_orig, y_cm_orig = x_cm, y_cm
+            x_cm = np.clip(x_cm, 0, 322)
+            y_cm = np.clip(y_cm, 0, 322)
+            if x_cm != x_cm_orig or y_cm != y_cm_orig:
+                n_clipped += 1
+            
             rows.append({
-                'video_frame': int(row['video_frame']),
-                'time_sec':    float(row['time_sec']),
-                'camera':      cam,
-                'x_cm':        x_cm,
-                'y_cm':        y_cm,
-                'pixel_x':     float(row['centroid_x']),
-                'pixel_y':     float(row['centroid_y']),
+                'absolute_time': row['absolute_time'],
+                'camera':        cam,
+                'x_cm':          x_cm,
+                'y_cm':          y_cm,
+                'pixel_x':       float(px),
+                'pixel_y':       float(py),
             })
+    
+    if n_filtered_pixel > 0:
+        print(f"  ⚠  Filtered {n_filtered_pixel} labels outside calibrated pixel region (margin={pixel_margin:.0f}px)")
+    if n_filtered_world > 0:
+        print(f"  ⚠  Filtered {n_filtered_world} projections outside world quadrant bounds (margin={world_margin_cm:.0f}cm)")
+    if n_clipped > 0:
+        print(f"  ℹ  Clipped {n_clipped} points to arena bounds [0, 322] cm")
+    
     return pd.DataFrame(rows)
 
 
 # ── Fuse overlapping frames ────────────────────────────────────────────────────
 
-def fuse_overlapping(cm_df: pd.DataFrame) -> pd.DataFrame:
+def fuse_overlapping(cm_df: pd.DataFrame, time_tolerance_sec: float = 0.1) -> pd.DataFrame:
     """
-    Where the same video_frame is labeled by multiple cameras (boundary overlap),
-    average the real-world cm positions.  The 'camera' column becomes a
-    comma-separated list of contributing cameras.
+    Where multiple cameras see the monkey at approximately the same absolute time,
+    average the real-world cm positions. Groups observations within time_tolerance_sec.
+    The 'camera' column becomes a comma-separated list of contributing cameras.
     """
     if cm_df.empty:
         return cm_df
 
+    # Sort by absolute time
+    cm_df = cm_df.sort_values('absolute_time').reset_index(drop=True)
+    
+    # Group by time windows (within tolerance)
     fused_rows = []
-    for frame, grp in cm_df.groupby('video_frame'):
-        if len(grp) == 1:
-            row = grp.iloc[0].to_dict()
+    current_group = [cm_df.iloc[0].to_dict()]
+    
+    for i in range(1, len(cm_df)):
+        row = cm_df.iloc[i]
+        prev_time = current_group[-1]['absolute_time']
+        
+        # If within tolerance, add to current group
+        if (row['absolute_time'] - prev_time).total_seconds() <= time_tolerance_sec:
+            current_group.append(row.to_dict())
         else:
-            row = {
-                'video_frame': frame,
-                'time_sec':    grp['time_sec'].iloc[0],
-                'camera':      ','.join(sorted(grp['camera'].tolist())),
-                'x_cm':        grp['x_cm'].mean(),
-                'y_cm':        grp['y_cm'].mean(),
-                'pixel_x':     float('nan'),
-                'pixel_y':     float('nan'),
-            }
-        fused_rows.append(row)
+            # Finalize current group
+            if len(current_group) == 1:
+                fused_rows.append(current_group[0])
+            else:
+                # Average positions from multiple cameras
+                fused_rows.append({
+                    'absolute_time': current_group[0]['absolute_time'],
+                    'camera':        ','.join(sorted(set(r['camera'] for r in current_group))),
+                    'x_cm':          np.mean([r['x_cm'] for r in current_group]),
+                    'y_cm':          np.mean([r['y_cm'] for r in current_group]),
+                    'pixel_x':       float('nan'),
+                    'pixel_y':       float('nan'),
+                })
+            # Start new group
+            current_group = [row.to_dict()]
+    
+    # Don't forget the last group
+    if len(current_group) == 1:
+        fused_rows.append(current_group[0])
+    else:
+        fused_rows.append({
+            'absolute_time': current_group[0]['absolute_time'],
+            'camera':        ','.join(sorted(set(r['camera'] for r in current_group))),
+            'x_cm':          np.mean([r['x_cm'] for r in current_group]),
+            'y_cm':          np.mean([r['y_cm'] for r in current_group]),
+            'pixel_x':       float('nan'),
+            'pixel_y':       float('nan'),
+        })
 
-    fused = pd.DataFrame(fused_rows).sort_values('video_frame').reset_index(drop=True)
+    fused = pd.DataFrame(fused_rows).reset_index(drop=True)
+    # Add time_sec as seconds from start
+    fused['time_sec'] = (fused['absolute_time'] - fused['absolute_time'].iloc[0]).dt.total_seconds()
     return fused
 
 
 # ── Interpolate gaps ───────────────────────────────────────────────────────────
 
 def interpolate_gaps(df: pd.DataFrame, fps: float,
-                     max_gap_frames: int = MAX_INTERP_FRAMES) -> pd.DataFrame:
+                     max_gap_sec: float = None) -> pd.DataFrame:
     """
-    Linearly interpolate x_cm / y_cm over temporal gaps ≤ max_gap_frames.
+    Linearly interpolate x_cm / y_cm over temporal gaps ≤ max_gap_sec.
     Inserted rows get camera = 'interpolated'.
     """
-    if df.empty or max_gap_frames == 0:
+    if df.empty:
+        return df
+    
+    if max_gap_sec is None:
+        max_gap_sec = MAX_INTERP_FRAMES / fps  # Convert frames to seconds
+    
+    if max_gap_sec == 0:
         return df
 
     rows = df.to_dict('records')
@@ -187,18 +369,21 @@ def interpolate_gaps(df: pd.DataFrame, fps: float,
 
     for i in range(1, len(rows)):
         prev, curr = rows[i - 1], rows[i]
-        gap = curr['video_frame'] - prev['video_frame']
-        if 1 < gap <= max_gap_frames:
-            for step in range(1, gap):
-                frac = step / gap
+        gap_sec = curr['time_sec'] - prev['time_sec']
+        
+        if 0 < gap_sec <= max_gap_sec:
+            # Interpolate at fps rate
+            n_steps = int(gap_sec * fps)
+            for step in range(1, n_steps):
+                frac = step / n_steps
                 filled.append({
-                    'video_frame': prev['video_frame'] + step,
-                    'time_sec':    prev['time_sec'] + step / fps,
-                    'camera':      'interpolated',
-                    'x_cm':        prev['x_cm'] + frac * (curr['x_cm'] - prev['x_cm']),
-                    'y_cm':        prev['y_cm'] + frac * (curr['y_cm'] - prev['y_cm']),
-                    'pixel_x':     float('nan'),
-                    'pixel_y':     float('nan'),
+                    'absolute_time': prev['absolute_time'] + pd.Timedelta(seconds=step / fps),
+                    'time_sec':      prev['time_sec'] + step / fps,
+                    'camera':        'interpolated',
+                    'x_cm':          prev['x_cm'] + frac * (curr['x_cm'] - prev['x_cm']),
+                    'y_cm':          prev['y_cm'] + frac * (curr['y_cm'] - prev['y_cm']),
+                    'pixel_x':       float('nan'),
+                    'pixel_y':       float('nan'),
                 })
         filled.append(curr)
 
@@ -290,13 +475,16 @@ def fuse(monkey_id: str = MONKEY_ID, session_date: str = SESSION_DATE,
     print(f"{'='*60}")
 
     print("\n── Loading homographies ──")
-    Hs = load_homographies(cal_dir, cameras)
+    Hs, pixel_bounds = load_homographies(cal_dir, cameras)
 
     print("\n── Loading labels ──")
     label_dfs = load_labels(labels_dir, cameras, fps)
 
     print("\n── Converting pixel → cm ──")
-    cm_df = apply_homographies(label_dfs, Hs)
+    cm_df = apply_homographies(label_dfs, Hs, pixel_bounds,
+                               filter_out_of_bounds=True,
+                               pixel_margin=100.0,
+                               world_margin_cm=10.0)  # Stricter world bounds
     if cm_df.empty:
         print("ERROR: No data after homography conversion. Check calibration and labels.")
         return pd.DataFrame()

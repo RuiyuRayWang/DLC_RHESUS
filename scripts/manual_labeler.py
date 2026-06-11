@@ -293,9 +293,14 @@ class ManualLabeler:
     # ── Export ─────────────────────────────────────────────────────────────────
 
     def _save(self):
+        # Parse video start timestamp from filename: D0X_YYYYMMDDHHMMSS.mp4
+        video_timestamp = self._parse_video_timestamp(self.video_path)
+        
         records = [
             {
                 'camera':      self.camera,
+                'video_file':  self.video_path.name,
+                'video_timestamp': video_timestamp,
                 'video_frame': fn,
                 'time_sec':    fn / self.fps,
                 'centroid_x':  x,
@@ -311,7 +316,24 @@ class ManualLabeler:
         n_miss = (~df['monkey_visible']).sum()
         print(f"\n✅  Saved {len(df)} labels → {self.output_csv}")
         print(f"   monkey visible: {n_vis}   no-monkey: {n_miss}")
+        print(f"   video start timestamp: {video_timestamp}")
         return df
+    
+    def _parse_video_timestamp(self, video_path: Path) -> str:
+        """
+        Extract timestamp from video filename.
+        Format: D0X_YYYYMMDDHHMMSS.mp4 → YYYY-MM-DD HH:MM:SS
+        """
+        import re
+        from datetime import datetime
+        
+        match = re.search(r'D0[1-4]_(\d{14})', video_path.name)
+        if not match:
+            return 'unknown'
+        
+        ts_str = match.group(1)  # e.g., '20260525164012'
+        dt = datetime.strptime(ts_str, '%Y%m%d%H%M%S')
+        return dt.strftime('%Y-%m-%d %H:%M:%S')  # '2026-05-25 16:40:12'
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
