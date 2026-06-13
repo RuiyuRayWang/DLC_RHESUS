@@ -289,6 +289,7 @@ def run(monkey_id: str, session_date: str):
         lo, hi = state['lo'], state['hi']
         sub = traj[(traj['time_sec'] >= lo) & (traj['time_sec'] <= hi)]
         bouts = _detect_bouts(sub) if not sub.empty else pd.DataFrame(columns=['duration_sec'])
+        mean_velocity = float(sub['velocity_cm_s'].mean()) if not sub.empty else 0.0
         t0  = sub['absolute_time'].iloc[0].isoformat() if not sub.empty else ''
         t1  = sub['absolute_time'].iloc[-1].isoformat() if not sub.empty else ''
         result = {
@@ -299,6 +300,7 @@ def run(monkey_id: str, session_date: str):
             'start_abs':    t0,
             'end_abs':      t1,
             'duration_sec': round(hi - lo, 3),
+            'mean_velocity_cm_s': round(mean_velocity, 3),
             'distance_cm':  round(float(sub['distance_cm'].sum()), 2) if not sub.empty else 0.0,
             'max_velocity_cm_s': round(float(sub['velocity_cm_s'].max()), 3) if not sub.empty else 0.0,
             'n_movement_bouts': int(len(bouts)),
