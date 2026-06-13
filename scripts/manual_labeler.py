@@ -309,8 +309,15 @@ class ManualLabeler:
             }
             for fn, (x, y) in sorted(self.labels.items())
         ]
-        df = pd.DataFrame(records)
+        columns = ['camera', 'video_file', 'video_timestamp', 'video_frame',
+                   'time_sec', 'centroid_x', 'centroid_y', 'monkey_visible']
+        df = pd.DataFrame(records, columns=columns)
         self.output_csv.parent.mkdir(parents=True, exist_ok=True)
+
+        if df.empty:
+            print(f"\n⚠  No labels recorded — output file not written.")
+            return df
+
         df.to_csv(self.output_csv, index=False)
         n_vis  = df['monkey_visible'].sum()
         n_miss = (~df['monkey_visible']).sum()

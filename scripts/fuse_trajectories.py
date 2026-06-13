@@ -50,6 +50,7 @@ CAMERA_QUADRANTS = {
 PROJECT_ROOT  = Path(__file__).resolve().parents[1]
 RESULTS_BASE = PROJECT_ROOT / 'results' / 'oft_analysis'
 CAL_BASE     = PROJECT_ROOT / 'results' / 'calibration'
+DEFAULT_TIME_ANCHORS_FILE = 'label_time_anchors.csv'
 
 # Interpolation: fill gaps ≤ this many frames (0 = disabled)
 MAX_INTERP_FRAMES = 40   # 2 s at 20 fps
@@ -128,23 +129,72 @@ def load_homographies(cal_dir: Path, cameras: List[str]):
 
 # ── Load labels ────────────────────────────────────────────────────────────────
 
+def load_time_anchors(time_anchors_path: Path) -> Dict[str, dict]:
+    """
+    Load per-CSV timestamp anchors.
+
+    Expected columns in CSV:
+      - csv_file (required): label CSV filename
+      - anchor_timestamp (required): confirmed timestamp for anchor frame
+      - anchor_video_frame (optional, default 0)
+
+    Returns dict keyed by csv filename.
+    """
+    if not time_anchors_path.exists():
+        return {}
+
+    df = pd.read_csv(time_anchors_path)
+    required = {'csv_file', 'anchor_timestamp'}
+    if not required.issubset(df.columns):
+        raise ValueError(
+            f"Time anchors file missing required columns {required}: {time_anchors_path}"
+        )
+
+    anchors: Dict[str, dict] = {}
+    for _, row in df.iterrows():
+        csv_name = str(row['csv_file']).strip()
+        if not csv_name:
+            continue
+        anchor_frame = 0
+        if 'anchor_video_frame' in df.columns and pd.notna(row.get('anchor_video_frame')):
+            anchor_frame = int(row['anchor_video_frame'])
+        anchors[csv_name] = {
+            'anchor_timestamp': pd.to_datetime(row['anchor_timestamp']),
+            'anchor_video_frame': anchor_frame,
+        }
+    return anchors
+
+
 def load_labels(labels_dir: Path, cameras: List[str],
-                fps: float = FPS) -> List[pd.DataFrame]:
+                fps: float = FPS,
+                time_anchors_path: Optional[Path] = None,
+                require_time_anchor: bool = False,
+                allow_legacy_video_timestamp: bool = False) -> List[pd.DataFrame]:
     """
     Load all per-camera label CSVs (handles multiple videos per camera).
     Returns list of DataFrames, one per label CSV file.
     """
-    from datetime import datetime
-    import re
-    
+    if time_anchors_path is None:
+        time_anchors_path = labels_dir / DEFAULT_TIME_ANCHORS_FILE
+    anchors = load_time_anchors(time_anchors_path)
+    if anchors:
+        print(f"  ✓  Loaded {len(anchors)} time anchors from {time_anchors_path.name}")
+    elif require_time_anchor:
+        print(f"ERROR: --require-time-anchor was set but no anchors found at {time_anchors_path}")
+        return []
+
     dfs: List[pd.DataFrame] = []
     
     for cam in cameras:
-        # Find all label CSVs for this camera: labels_D03.csv, labels_D03_170340.csv, etc.
+        # Find all label CSVs for this camera.
+        # Supported naming styles:
+        #   1) labels_D03.csv / labels_D03_170340.csv
+        #   2) D03_20260525164012.csv
         # Camera names are D1-D4 but filenames use D01-D04 (with leading zero)
         cam_num = cam[1]  # '1', '2', '3', '4'
-        pattern = f'labels_D0{cam_num}*.csv'
-        csv_files = sorted(labels_dir.glob(pattern))
+        prefixed = list(labels_dir.glob(f'labels_D0{cam_num}*.csv'))
+        raw_ts = list(labels_dir.glob(f'D0{cam_num}_*.csv'))
+        csv_files = sorted(set(prefixed + raw_ts))
         
         if not csv_files:
             print(f"  ⚠  No labels for {cam}")
@@ -163,31 +213,49 @@ def load_labels(labels_dir: Path, cameras: List[str],
             if df.empty:
                 continue
             
-            # Compute absolute timestamp for each frame
-            if 'video_timestamp' in df.columns:
-                # New format: video_timestamp already in CSV
-                base_time = pd.to_datetime(df['video_timestamp'].iloc[0])
+            # Build per-row time offsets from frame index when available.
+            # At 20 FPS: 1 frame = 0.05 s (20 frames = 1 s).
+            if 'video_frame' in df.columns:
+                frame_offsets_sec = df['video_frame'] / fps
             else:
-                # Legacy format: try to parse from filename or video_file column
-                if 'video_file' in df.columns:
-                    video_name = df['video_file'].iloc[0]
-                else:
-                    # Fall back to CSV filename
-                    video_name = csv_file.name
-                
-                match = re.search(r'D0[1-4]_(\d{14})', video_name)
-                if match:
-                    ts_str = match.group(1)
-                    base_time = datetime.strptime(ts_str, '%Y%m%d%H%M%S')
-                else:
-                    print(f"  ⚠  Could not parse timestamp from {csv_file.name}, skipping")
+                frame_offsets_sec = df['time_sec']
+
+            # Priority 1: human/OCR-confirmed anchor file
+            anchor = anchors.get(csv_file.name)
+            if anchor is not None:
+                anchor_ts = anchor['anchor_timestamp']
+                anchor_frame = anchor['anchor_video_frame']
+                df['absolute_time'] = anchor_ts + pd.to_timedelta(
+                    (df['video_frame'] - anchor_frame) / fps if 'video_frame' in df.columns else frame_offsets_sec,
+                    unit='s'
+                )
+                start_str = pd.to_datetime(df['absolute_time'].iloc[0]).strftime('%H:%M:%S')
+                print(f"  ✓  {cam} ({csv_file.name}): {len(df)} frames, start={start_str} [anchor]")
+            else:
+                if require_time_anchor:
+                    print(f"  ⚠  Missing anchor for {csv_file.name}; skipping (--require-time-anchor)")
                     continue
-            
-            # Add absolute timestamp column
-            df['absolute_time'] = base_time + pd.to_timedelta(df['time_sec'], unit='s')
+
+                if not allow_legacy_video_timestamp:
+                    print(f"  ⚠  Missing anchor for {csv_file.name}; skipping (no legacy timing allowed)")
+                    continue
+
+                base_time = None
+                if 'video_timestamp' in df.columns:
+                    ts_val = str(df['video_timestamp'].iloc[0]).strip()
+                    if ts_val and ts_val.lower() != 'unknown':
+                        base_time = pd.to_datetime(ts_val)
+
+                if base_time is None:
+                    print(f"  ⚠  Missing anchor and no legacy video_timestamp for {csv_file.name}; skipping")
+                    continue
+
+                df['absolute_time'] = base_time + pd.to_timedelta(frame_offsets_sec, unit='s')
+                start_str = pd.to_datetime(df['absolute_time'].iloc[0]).strftime('%H:%M:%S')
+                print(f"  ✓  {cam} ({csv_file.name}): {len(df)} frames, start={start_str} [legacy-video_timestamp]")
+
             df['camera'] = cam
-            
-            print(f"  ✓  {cam} ({csv_file.name}): {len(df)} frames, start={base_time.strftime('%H:%M:%S')}")
+
             dfs.append(df)
     
     return dfs
@@ -431,6 +499,8 @@ def compute_summary(traj: pd.DataFrame, bouts: pd.DataFrame) -> dict:
     total_dur    = traj['time_sec'].max() - traj['time_sec'].min()
     total_dist   = traj['distance_cm'].sum()
     mean_vel     = traj['velocity_cm_s'].mean()
+    moving_mask  = traj['velocity_cm_s'] > VELOCITY_THRESHOLD
+    mean_vel_moving = traj.loc[moving_mask, 'velocity_cm_s'].mean() if moving_mask.any() else 0.0
     immob_frames = (traj['velocity_cm_s'] <= VELOCITY_THRESHOLD).sum()
     immob_pct    = 100.0 * immob_frames / len(traj) if len(traj) > 0 else 0.0
 
@@ -438,6 +508,7 @@ def compute_summary(traj: pd.DataFrame, bouts: pd.DataFrame) -> dict:
         'total_duration_sec':           round(float(total_dur), 2),
         'total_distance_cm':            round(float(total_dist), 2),
         'mean_velocity_cm_s':           round(float(mean_vel), 3),
+        'mean_velocity_moving_cm_s':    round(float(mean_vel_moving), 3),
         'max_velocity_cm_s':            round(float(traj['velocity_cm_s'].max()), 3),
         'immobility_pct':               round(immob_pct, 2),
         'n_movement_bouts':             len(bouts),
@@ -460,7 +531,10 @@ def fuse(monkey_id: str = MONKEY_ID, session_date: str = SESSION_DATE,
          max_interp: int = MAX_INTERP_FRAMES,
          cal_dir: Optional[Path] = None,
          labels_dir: Optional[Path] = None,
-         output_dir: Optional[Path] = None) -> pd.DataFrame:
+         output_dir: Optional[Path] = None,
+         time_anchors_path: Optional[Path] = None,
+         require_time_anchor: bool = True,
+         allow_legacy_video_timestamp: bool = False) -> pd.DataFrame:
 
     cameras = cameras or CAMERAS
 
@@ -478,7 +552,14 @@ def fuse(monkey_id: str = MONKEY_ID, session_date: str = SESSION_DATE,
     Hs, pixel_bounds = load_homographies(cal_dir, cameras)
 
     print("\n── Loading labels ──")
-    label_dfs = load_labels(labels_dir, cameras, fps)
+    label_dfs = load_labels(
+        labels_dir,
+        cameras,
+        fps,
+        time_anchors_path=time_anchors_path,
+        require_time_anchor=require_time_anchor,
+        allow_legacy_video_timestamp=allow_legacy_video_timestamp,
+    )
 
     print("\n── Converting pixel → cm ──")
     cm_df = apply_homographies(label_dfs, Hs, pixel_bounds,
@@ -548,6 +629,13 @@ def main():
                         help='Labels dir (default: results/oft_analysis/<monkey>/<date>/)')
     parser.add_argument('--output-dir',  default=None,
                         help='Output dir (default: same as labels-dir)')
+    parser.add_argument('--time-anchors', default=None,
+                        help=f'CSV with confirmed per-file time anchors (default: <labels-dir>/{DEFAULT_TIME_ANCHORS_FILE})')
+    parser.add_argument('--no-require-time-anchor', action='store_false', dest='require_time_anchor',
+                        help='Do not require time anchors; allows non-anchor files only when combined with --allow-legacy-video-timestamp')
+    parser.add_argument('--allow-legacy-video-timestamp', action='store_true',
+                        help='Allow fallback to legacy video_timestamp column when no anchor exists')
+    parser.set_defaults(require_time_anchor=True)
     args = parser.parse_args()
 
     fuse(
@@ -559,6 +647,9 @@ def main():
         cal_dir=Path(args.cal_dir) if args.cal_dir else None,
         labels_dir=Path(args.labels_dir) if args.labels_dir else None,
         output_dir=Path(args.output_dir) if args.output_dir else None,
+        time_anchors_path=Path(args.time_anchors) if args.time_anchors else None,
+        require_time_anchor=args.require_time_anchor,
+        allow_legacy_video_timestamp=args.allow_legacy_video_timestamp,
     )
 
 
