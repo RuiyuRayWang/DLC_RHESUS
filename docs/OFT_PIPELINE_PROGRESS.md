@@ -2,7 +2,7 @@
 
 **Project:** PAL_ENHANCER OFT tracking  
 **Environment:** `video_tracking`  
-**Updated:** 2026-06-13
+**Updated:** 2026-06-15
 
 ## Current state
 
@@ -12,6 +12,7 @@ The macOS OFT pipeline is operational end-to-end:
 2. Anchor-based multi-video time alignment
 3. Real-world trajectory fusion
 4. Window selection for quantification
+5. Daily behavior titration plots in RStudio/Posit
 
 ## Stable workflow
 
@@ -22,6 +23,7 @@ Use this sequence for each session:
 3. Curate `anchor_timestamp` manually (VSPlayer)
 4. Fuse trajectory (`fuse_trajectories.py`)
 5. Select analysis window (`select_time_window.py`)
+6. Plot daily titration metrics (`scripts/plot_pd_behavior_titration.R`)
 
 Primary reference:
 - `docs/MULTI_VIDEO_WORKFLOW.md`
@@ -32,6 +34,8 @@ Primary reference:
 - Fusion uses anchor-based absolute time per file.
 - Projection cleanup is active (camera-region filtering and arena clipping).
 - Selector displays window metrics including distance, max velocity, movement bouts, mean bout duration, and active time.
+- `selected_time_window.json` now exports active-period mean velocity, immobility time, and window-derived active/immobility durations.
+- Daily titration plots are generated interactively in RStudio with explicit `...` gaps for missing dates.
 
 ## Core outputs per session
 
@@ -39,12 +43,14 @@ Primary reference:
 - `movement_bouts.csv`
 - `trajectory_summary.json`
 - `selected_time_window.json`
+- `pd_behavior_titration_metrics.csv` (optional QC table)
 
 ## Open items
 
 - Keep anchor timestamps curated and auditable (`method`, `notes`).
 - Re-run notebook visual QC when fusion parameters change.
 - Optional: evaluate additional QC summaries for projection filtering.
+- Optional: use the R titration script for a quick longitudinal summary across days.
 
 ## Sync reminder
 

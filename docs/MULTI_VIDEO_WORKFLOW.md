@@ -66,6 +66,20 @@ python scripts/select_time_window.py --monkey H1705011 --date 2026-05-26
 Output:
 - `selected_time_window.json`
 
+### 5) Plot daily titration metrics in RStudio
+
+Open [scripts/plot_pd_behavior_titration.R](../scripts/plot_pd_behavior_titration.R) in RStudio/Posit and run the script.
+
+The script scans daily `selected_time_window.json` files and plots:
+- Mean velocity (moving; cm/s)
+- Distance traveled (cm)
+- Max velocity (cm/s)
+- Movement bouts
+- Mean bout duration (s)
+- Immobility time (s)
+
+Missing days are shown as `...` gaps between observed dates.
+
 ## Troubleshooting
 
 ### Fusion skips files

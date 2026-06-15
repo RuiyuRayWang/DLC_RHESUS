@@ -53,12 +53,27 @@ python scripts/fuse_trajectories.py --monkey H1705011 --date 2026-05-25
 python scripts/select_time_window.py --monkey H1705011 --date 2026-05-25
 ```
 
+## 6) Plot behavior titration in RStudio
+
+Open [scripts/plot_pd_behavior_titration.R](../scripts/plot_pd_behavior_titration.R) in RStudio/Posit and run the script.
+
+It reads daily `selected_time_window.json` files and plots these metrics by date:
+- Mean velocity (moving; cm/s)
+- Distance traveled (cm)
+- Max velocity (cm/s)
+- Movement bouts
+- Mean bout duration (s)
+- Immobility time (s)
+
+The x-axis uses only observed dates, with `...` gaps between missing days.
+
 ## Main outputs
 
 - `results/oft_analysis/H1705011/2026-05-25/trajectory_realworld.csv`
 - `results/oft_analysis/H1705011/2026-05-25/movement_bouts.csv`
 - `results/oft_analysis/H1705011/2026-05-25/trajectory_summary.json`
 - `results/oft_analysis/H1705011/2026-05-25/selected_time_window.json`
+- RStudio titration plot output appears in the Plots panel
 
 ## See also
 
