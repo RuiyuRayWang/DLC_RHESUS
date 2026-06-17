@@ -1,0 +1,462 @@
+#!/usr/bin/env python3
+"""
+Convert manual labels to DeepLabCut format and create DLC project.
+
+This script:
+1. Reads your manual label CSVs
+2. Extracts labeled frames as images
+3. Creates a DeepLabCut project with proper structure
+4. Converts labels to DLC's HDF5 format
+5. Prepares the project for training
+
+Usage:
+    conda install -c conda-forge deeplabcut
+    python scripts/setup_deeplabcut_project.py
+
+After running this, you can train with:
+    import deeplabcut
+    deeplabcut.train_network(config_path)
+"""
+
+import pandas as pd
+import cv2
+import numpy as np
+from pathlib import Path
+import yaml
+import shutil
+import json
+from datetime import datetime
+from tqdm import tqdm
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+LABEL_DIR = PROJECT_ROOT / 'results' / 'oft_analysis'
+DLC_PROJECT_DIR = PROJECT_ROOT / 'deeplabcut_projects'
+
+# Video directories (search in order of priority)
+VIDEO_DIRS = [
+    Path('/media/luolab/memcore/oft_rhp/H1705011'),  # Local fast storage (primary)
+    Path('/media/luolab/MyBook2/oft_rhp/H1705011'),  # External drive (fallback)
+    PROJECT_ROOT / 'data' / 'oft_rhp',               # Project data (fallback)
+]
+
+# DeepLabCut project settings
+PROJECT_NAME = 'monkey_oft_tracking'
+EXPERIMENTER = 'luolab'
+BODYPART = 'head'  # single point: monkey body centroid
+
+# Training parameters
+TRAIN_FRACTION = 0.95  # use 95% for training, 5% for testing
+MAX_FRAMES_PER_VIDEO = 500  # limit frames per video to avoid huge project
+
+
+# ── Find all labeled CSVs ──────────────────────────────────────────────────────
+
+def load_label_config():
+    """Load selected label files from config."""
+    config_path = PROJECT_ROOT / 'deeplabcut_label_config.json'
+    
+    if not config_path.exists():
+        print("❌ No label file configuration found!")
+        print("\nPlease run the file selector first:")
+        print("   python scripts/select_label_files.py")
+        print("\nThis will open a GUI to select which CSV files contain labels.")
+        return None
+    
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        selected_files = config.get('selected_files', [])
+        if not selected_files:
+            print("❌ No files selected in config!")
+            print("\nPlease run the file selector:")
+            print("   python scripts/select_label_files.py")
+            return None
+        
+        # Convert to Path objects and verify they exist
+        csv_files = []
+        for file_path in selected_files:
+            p = Path(file_path)
+            if p.exists():
+                csv_files.append(p)
+            else:
+                print(f"⚠️  File not found (skipping): {p}")
+        
+        return csv_files
+    
+    except Exception as e:
+        print(f"❌ Error loading config: {e}")
+        return None
+
+
+def find_label_csvs():
+    """Find all manual label CSV files (legacy - not used anymore)."""
+    csvs = list(LABEL_DIR.rglob('*.csv'))
+    # Filter out trajectory CSVs (these are from fusion, not manual labels)
+    csvs = [c for c in csvs if 'trajectory' not in c.name and 'manual_labels' not in c.name]
+    return csvs
+
+
+def load_labels(csv_path):
+    """Load labels from manual_labeler CSV."""
+    try:
+        df = pd.read_csv(csv_path)
+        
+        # Check for required columns
+        required_cols = {'video_file', 'centroid_x', 'centroid_y', 'monkey_visible'}
+        missing_cols = required_cols - set(df.columns)
+        
+        if missing_cols:
+            print(f"   ⚠️  Skipping (missing columns: {missing_cols})")
+            return None
+        
+        # Filter to only visible monkey frames
+        df = df[df['monkey_visible'] == True].copy()
+        
+        # Check if any frames remain after filtering
+        if len(df) == 0:
+            print(f"   ⚠️  Skipping (no visible frames)")
+            return None
+        
+        return df
+    
+    except Exception as e:
+        print(f"   ⚠️  Error reading file: {e}")
+        return None
+
+
+# ── Extract labeled frames ─────────────────────────────────────────────────────
+
+def extract_labeled_frames(df, video_path, output_dir, max_frames=None):
+    """
+    Extract frames from video at labeled frame numbers.
+    
+    HEVC codec requires sequential reading - cannot seek directly.
+    
+    Returns:
+        list of (image_path, frame_num, x, y) tuples
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        print(f"⚠️  Could not open video: {video_path}")
+        return []
+    
+    total_frames = len(df)
+    if max_frames and total_frames > max_frames:
+        # Sample uniformly to stay under limit
+        df = df.sample(n=max_frames, random_state=42)
+        print(f"   Sampling {max_frames}/{total_frames} frames")
+    
+    # Sort by frame number for sequential reading
+    df = df.sort_values('video_frame').reset_index(drop=True)
+    
+    # Create set of target frame numbers for fast lookup
+    target_frames = set(df['video_frame'].astype(int))
+    
+    # Create mapping from frame_num to (x, y) coordinates
+    frame_coords = {}
+    for _, row in df.iterrows():
+        frame_num = int(row['video_frame'])
+        frame_coords[frame_num] = (int(row['centroid_x']), int(row['centroid_y']))
+    
+    # Read frames sequentially
+    extracted = []
+    current_frame = 0
+    max_target_frame = max(target_frames)
+    
+    # Progress bar
+    pbar = tqdm(total=max_target_frame + 1, desc=f"   Reading {video_path.stem}", 
+                unit="frame", leave=False)
+    
+    while current_frame <= max_target_frame:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        # Save frame if it's a labeled one
+        if current_frame in target_frames:
+            x, y = frame_coords[current_frame]
+            
+            img_name = f"{video_path.stem}_frame{current_frame:06d}.png"
+            img_path = output_dir / img_name
+            cv2.imwrite(str(img_path), frame)
+            
+            extracted.append((img_path, current_frame, x, y))
+            pbar.set_postfix({'extracted': len(extracted)})
+        
+        current_frame += 1
+        pbar.update(1)
+    
+    pbar.close()
+    
+    cap.release()
+    
+    if len(extracted) < len(target_frames):
+        print(f"   ⚠️  Warning: Only extracted {len(extracted)}/{len(target_frames)} frames")
+    
+    return extracted
+
+
+# ── Create DeepLabCut project ──────────────────────────────────────────────────
+
+def create_dlc_project():
+    """Create DeepLabCut project directory structure."""
+    
+    # Create project directory
+    date_str = datetime.now().strftime('%Y-%m-%d')
+    project_dir = DLC_PROJECT_DIR / f"{PROJECT_NAME}-{EXPERIMENTER}-{date_str}"
+    
+    if project_dir.exists():
+        print(f"⚠️  Project already exists: {project_dir}")
+        response = input("   Overwrite? (y/n): ")
+        if response.lower() != 'y':
+            return None
+        shutil.rmtree(project_dir)
+    
+    project_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create subdirectories
+    (project_dir / 'labeled-data').mkdir()
+    (project_dir / 'videos').mkdir()
+    (project_dir / 'training-datasets').mkdir()
+    
+    return project_dir
+
+
+def create_config_yaml(project_dir, video_paths):
+    """Create DeepLabCut config.yaml file."""
+    
+    config = {
+        'Task': PROJECT_NAME,
+        'scorer': EXPERIMENTER,
+        'date': datetime.now().strftime('%b%d'),
+        'project_path': str(project_dir),
+        
+        # Single bodypart: monkey centroid
+        'bodyparts': [BODYPART],
+        'skeleton': [],  # no skeleton connections for single point
+        
+        # Video settings
+        'video_sets': {
+            str(v): {'crop': '0, 1920, 0, 1080'}  # 4K video
+            for v in video_paths
+        },
+        
+        # Training parameters
+        'TrainingFraction': [TRAIN_FRACTION],
+        'iteration': 0,
+        'default_net_type': 'resnet_50',
+        'snapshotindex': -1,
+        'batch_size': 8,
+        
+        # Data augmentation
+        'multianimalproject': False,
+        'dotsize': 12,
+        'alphavalue': 0.7,
+        'colormap': 'rainbow',
+        
+        # Network config
+        'pos_dist_thresh': 17,
+        'global_scale': 0.8,
+        'scale_jitter_lo': 0.5,
+        'scale_jitter_up': 1.25,
+    }
+    
+    config_path = project_dir / 'config.yaml'
+    with open(config_path, 'w') as f:
+        yaml.dump(config, f, default_flow_style=False)
+    
+    return config_path
+
+
+def convert_to_dlc_format(extracted_frames, output_dir):
+    """
+    Convert manual labels to DeepLabCut HDF5 format.
+    
+    DLC expects a pandas DataFrame with MultiIndex columns:
+    - Level 0: scorer name
+    - Level 1: bodypart name  
+    - Level 2: coordinate ('x' or 'y')
+    
+    Index: relative image paths
+    """
+    
+    # Build records
+    records = []
+    for img_path, frame_num, x, y in extracted_frames:
+        # DLC uses relative paths from project root
+        rel_path = f"labeled-data/{img_path.parent.name}/{img_path.name}"
+        records.append({
+            'image': rel_path,
+            f'{EXPERIMENTER}_{BODYPART}_x': x,
+            f'{EXPERIMENTER}_{BODYPART}_y': y,
+        })
+    
+    df = pd.DataFrame(records)
+    df = df.set_index('image')
+    
+    # Create MultiIndex columns (scorer, bodypart, coords)
+    columns = pd.MultiIndex.from_tuples([
+        (EXPERIMENTER, BODYPART, 'x'),
+        (EXPERIMENTER, BODYPART, 'y'),
+    ], names=['scorer', 'bodyparts', 'coords'])
+    
+    df.columns = columns
+    
+    # Save as HDF5 (DLC format)
+    h5_path = output_dir / f'CollectedData_{EXPERIMENTER}.h5'
+    df.to_hdf(h5_path, key='df_with_missing', mode='w')
+    
+    # Also save CSV for inspection
+    csv_path = output_dir / f'CollectedData_{EXPERIMENTER}.csv'
+    df.to_csv(csv_path)
+    
+    print(f"✅  Converted {len(df)} labels → {h5_path}")
+    return h5_path
+
+
+# ── Main workflow ──────────────────────────────────────────────────────────────
+
+def main():
+    print("=" * 70)
+    print("DeepLabCut Project Setup from Manual Labels")
+    print("=" * 70)
+    
+    # 1. Load selected CSV files from config
+    print("\n1. Loading selected label files from config...")
+    csv_files = load_label_config()
+    
+    if csv_files is None:
+        return
+    
+    print(f"   Found {len(csv_files)} selected label files")
+    for csv in csv_files:
+        print(f"   - {csv.relative_to(PROJECT_ROOT)}")
+    
+    if not csv_files:
+        print("❌ No label files found!")
+        return
+    
+    # 2. Create DLC project
+    print("\n2. Creating DeepLabCut project...")
+    project_dir = create_dlc_project()
+    if not project_dir:
+        print("❌ Project creation cancelled")
+        return
+    print(f"   Project: {project_dir}")
+    
+    # 3. Process each labeled video
+    print("\n3. Extracting labeled frames...")
+    print(f"   ⏱️  This may take 10-30 minutes for HEVC videos (sequential reading required)")
+    
+    all_extracted = []
+    video_paths = []
+    
+    import time
+    start_time = time.time()
+    
+    for i, csv_path in enumerate(csv_files, 1):
+        print(f"\n   [{i}/{len(csv_files)}] Processing: {csv_path.name}")
+        
+        # Load labels
+        df = load_labels(csv_path)
+        if df is None or len(df) == 0:
+            continue
+        
+        print(f"   - {len(df)} visible monkey frames")
+        
+        # Find corresponding video in multiple directories
+        video_file = df['video_file'].iloc[0]
+        video_path = None
+        
+        for video_dir in VIDEO_DIRS:
+            if not video_dir.exists():
+                continue
+            
+            # Try direct match first
+            direct_path = video_dir / video_file
+            if direct_path.exists():
+                video_path = direct_path
+                break
+            
+            # Try recursive search
+            for vp in video_dir.rglob(video_file):
+                video_path = vp
+                break
+            
+            if video_path:
+                break
+        
+        if not video_path or not video_path.exists():
+            print(f"   ⚠️  Video not found: {video_file}")
+            print(f"      Searched in: {[str(d) for d in VIDEO_DIRS if d.exists()]}")
+            continue
+        
+        video_paths.append(video_path)
+        
+        # Extract frames
+        video_label_dir = project_dir / 'labeled-data' / video_path.stem
+        extracted = extract_labeled_frames(df, video_path, video_label_dir, 
+                                          max_frames=MAX_FRAMES_PER_VIDEO)
+        all_extracted.extend(extracted)
+        print(f"   ✅ Extracted {len(extracted)} frames → {video_label_dir.name}")
+        
+        # Progress estimate
+        elapsed = time.time() - start_time
+        avg_time = elapsed / i
+        remaining = avg_time * (len(csv_files) - i)
+        print(f"   ⏱️  Elapsed: {elapsed/60:.1f}m | Est. remaining: {remaining/60:.1f}m")
+    
+    elapsed_total = time.time() - start_time
+    
+    if not all_extracted:
+        print("❌ No frames extracted!")
+        return
+    
+    print(f"\n   ✅ Total frames extracted: {len(all_extracted)} in {elapsed_total/60:.1f} minutes")
+    
+    # 4. Create config.yaml
+    print("\n4. Creating config.yaml...")
+    config_path = create_config_yaml(project_dir, video_paths)
+    print(f"   Config: {config_path}")
+    
+    # 5. Convert labels to DLC format
+    print("\n5. Converting labels to DeepLabCut format...")
+    training_dir = project_dir / 'training-datasets' / 'iteration-0'
+    training_dir.mkdir(parents=True, exist_ok=True)
+    h5_path = convert_to_dlc_format(all_extracted, training_dir)
+    
+    # 6. Summary and next steps
+    print("\n" + "=" * 70)
+    print("✅ DeepLabCut Project Setup Complete!")
+    print("=" * 70)
+    print(f"\nProject directory: {project_dir}")
+    print(f"Config file: {config_path}")
+    print(f"Labeled frames: {len(all_extracted)}")
+    print(f"Videos: {len(video_paths)}")
+    
+    print("\n" + "-" * 70)
+    print("Next steps:")
+    print("-" * 70)
+    print("\n1. Install DeepLabCut (if not already installed):")
+    print("   conda install -c conda-forge deeplabcut")
+    print("\n2. Create training dataset:")
+    print("   import deeplabcut")
+    print(f"   config = r'{config_path}'")
+    print("   deeplabcut.create_training_dataset(config)")
+    print("\n3. Train the network:")
+    print("   deeplabcut.train_network(config, shuffle=1)")
+    print("\n4. Evaluate the network:")
+    print("   deeplabcut.evaluate_network(config)")
+    print("\n5. Analyze new videos:")
+    print("   deeplabcut.analyze_videos(config, ['/path/to/new/video.mp4'])")
+    print("\n" + "=" * 70)
+
+
+if __name__ == '__main__':
+    main()

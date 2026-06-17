@@ -267,3 +267,4 @@ analysis/*.xml
 !docs/
 !vignettes/
 !requirements.txt
+deeplabcut_projects/
