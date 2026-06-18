@@ -42,6 +42,18 @@ Train a DeepLabCut neural network model for automated monkey centroid tracking i
 - **Image size:** 448×448 crops
 - **Data augmentation:** Rotation ±30°, scaling 0.5-1.25x, motion blur, Gaussian noise
 
+### 5. Workflow Redesign (2026-06-17)
+- **Visibility-first labeling:** `manual_labeler.py --mode visibility` marks sampled frames as `visible` or `no monkey`
+- **Head-only labeling:** `manual_labeler.py --mode head` revisits only visible frames for head coordinates
+- **Per-video label CSVs:** default output is now one CSV per video, avoiding accidental overwrite across sessions
+- **DLC setup safeguard:** `setup_deeplabcut_project.py` skips visible rows that do not yet have head coordinates
+
+This redesign separates:
+1. `monkey present?`
+2. `where is the head?`
+
+That keeps `no monkey` frames out of localization training while preserving visibility metadata for downstream gating.
+
 ---
 
 ## 📊 Current Training Status
@@ -146,8 +158,22 @@ deeplabcut.create_labeled_video(config_path, [video_path])
 
 ### Video Format
 - **Original tracking:** 4K resolution (3840×2160)
-- **Training videos:** HD (1920×1080), HEVC codec
+- **Extracted labeled PNGs in current DLC project:** 3840×2160
+- **Training crops actually fed to the network:** 448×448
+- **Video codec:** HEVC
 - **Frame rate:** 20 fps
+
+### Resolution / speed interpretation
+- The current project stores full 4K labeled PNGs.
+- Training itself uses 448×448 crops, so the network is not ingesting full-frame 4K tensors.
+- Downsampling the source dataset to 1920×1080 may still reduce I/O and project size, but likely will not be the single biggest training-speed improvement.
+- Faster experiments are more likely to come from a smaller crop size and/or a lighter backbone.
+
+### Recommended speed experiments
+1. **Reduce crop size** from 448 to 384 or 320 if accuracy remains acceptable.
+2. **Try a lighter backbone** such as `mobilenet_v2_1.0` for rapid iteration.
+3. **Downsample to 1920×1080** only as a controlled experiment, and rebuild labels/project consistently.
+4. **Use visibility gating at inference** so DLC is not run blindly on long no-monkey segments.
 
 ### Label Structure
 - **Bodyparts:** `head` (single point - monkey centroid)

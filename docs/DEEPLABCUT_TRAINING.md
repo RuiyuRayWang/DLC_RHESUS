@@ -8,11 +8,68 @@
 
 You've manually labeled **~4,200 frames** across multiple OFT videos. This is enough data to train a DeepLabCut neural network to automatically track the monkey in new videos.
 
+Important design note: DeepLabCut is a **keypoint localizer**, not a `monkey present / monkey absent` classifier. Even if you train only on frames where the monkey is visible, DLC will still try to place a point on every frame you analyze. In this project, that means `no monkey` frames must be handled explicitly in the workflow.
+
 **Benefits:**
 - ⚡ **Automate labeling** — DLC can label new videos at ~60 FPS
 - 🎯 **High accuracy** — Typically >95% with your data quantity
 - 📈 **Incremental improvement** — Add more manual labels if needed
 - 🔄 **Transfer learning** — Fine-tune on new sessions
+
+---
+
+## Recommended Workflow: Separate Visibility from Head Localization
+
+### Why this is necessary
+
+- Many OFT videos contain long stretches where the monkey is not visible.
+- DLC should be trained only on frames where the monkey is actually present.
+- At inference time, DLC still predicts a head position on every frame unless you gate or filter those predictions.
+
+### Two-pass annotation workflow
+
+#### Pass 1: Visibility labeling
+
+Mark sampled frames as either `visible` or `no monkey`.
+
+```bash
+python scripts/manual_labeler.py \
+    --camera D2 \
+    --video /path/to/D02_YYYYMMDDHHMMSS.mp4 \
+    --mode visibility
+```
+
+Controls in visibility mode:
+- `V` = monkey visible
+- `M` = no monkey visible
+- `N` = next frame
+- `P` = previous frame
+- `U` = undo
+
+#### Pass 2: Head labeling
+
+Re-open the same video and label only the frames that were marked visible in pass 1.
+
+```bash
+python scripts/manual_labeler.py \
+    --camera D2 \
+    --video /path/to/D02_YYYYMMDDHHMMSS.mp4 \
+    --mode head
+```
+
+In head mode, the labeler restricts the session to frames already marked `monkey_visible == True` and stores head coordinates only for those frames.
+
+### What enters DLC training
+
+- The manual label CSV keeps **both** visible and no-monkey frames for bookkeeping.
+- `setup_deeplabcut_project.py` filters to `monkey_visible == True`.
+- Visible rows that still lack head coordinates are skipped until head labeling is completed.
+
+This means the DLC training set should contain **only visible-monkey frames with valid head coordinates**.
+
+### Inference implication
+
+Even after this cleanup, DLC will still predict a head on every analyzed frame. For production use, predictions should be gated by a separate visibility pass or filtered by confidence / visibility metadata.
 
 ---
 
@@ -71,6 +128,8 @@ python scripts/setup_deeplabcut_project.py
 
 **⚠️ Note:** Frame extraction may take 10-30 minutes due to HEVC video format requiring sequential reading. Be patient!
 
+**Resolution note:** the current project extracts full-size PNG frames at **3840×2160**. The PyTorch training config then samples **448×448** crops during training.
+
 **Output:**
 ```
 deeplabcut_projects/
@@ -117,6 +176,29 @@ deeplabcut.train_network(
 **Training time:**
 - **GPU (NVIDIA):** 2-4 hours for 50k iterations
 - **CPU:** 8-24 hours (not recommended)
+
+### Training speed and resolution
+
+Current project facts:
+- Extracted labeled PNGs are **3840×2160**.
+- Current PyTorch training uses **448×448** crops (`crop_sampling.height = 448`, `crop_sampling.width = 448`).
+- Current backbone is **ResNet-50 GN**.
+
+Implications:
+- Training is **not** feeding full 4K tensors directly into the network.
+- Downsampling the source frames may still reduce disk I/O, project size, and some preprocessing overhead.
+- The biggest training-speed gains are more likely to come from reducing crop size or using a lighter backbone than from downsampling alone.
+
+Practical recommendations:
+1. Keep the visibility-first workflow so the model trains only on useful frames.
+2. Consider reducing training crop size from `448×448` to `384×384` or `320×320` if the monkey head remains clearly resolved.
+3. Consider switching from `resnet_50` to `mobilenet_v2_1.0` for faster experiments.
+4. If you downsample the entire dataset to **1920×1080**, regenerate the DLC project and scale labels consistently.
+
+Downsampling recommendation:
+- **Yes, downsampling to 1920×1080 is a reasonable experiment** if the monkey is still large enough to localize reliably.
+- Expect a modest to moderate speed improvement, not an order-of-magnitude change.
+- The larger benefit will likely be in **inference speed** and storage efficiency.
 
 ### 4. Evaluate Performance
 

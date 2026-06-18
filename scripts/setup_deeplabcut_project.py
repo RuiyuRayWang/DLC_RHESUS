@@ -44,11 +44,12 @@ VIDEO_DIRS = [
 # DeepLabCut project settings
 PROJECT_NAME = 'monkey_oft_tracking'
 EXPERIMENTER = 'luolab'
-BODYPART = 'head'  # single point: monkey body centroid
+BODYPART = 'head'  # single point: monkey head
 
 # Training parameters
 TRAIN_FRACTION = 0.95  # use 95% for training, 5% for testing
-MAX_FRAMES_PER_VIDEO = 500  # limit frames per video to avoid huge project
+TARGET_TOTAL_FRAMES = 4000  # global cap for extracted labeled frames
+MAX_FRAMES_PER_VIDEO = 200  # secondary guardrail per video
 
 
 # ── Find all labeled CSVs ──────────────────────────────────────────────────────
@@ -114,17 +115,80 @@ def load_labels(csv_path):
         
         # Filter to only visible monkey frames
         df = df[df['monkey_visible'] == True].copy()
+
+        # Visibility-only pass can mark frames without head coordinates yet.
+        # DLC localization training must exclude those rows.
+        before_coords = len(df)
+        df = df.dropna(subset=['centroid_x', 'centroid_y']).copy()
+        df = df[(df['centroid_x'] != -1) & (df['centroid_y'] != -1)].copy()
+        skipped_missing_coords = before_coords - len(df)
         
         # Check if any frames remain after filtering
         if len(df) == 0:
             print(f"   ⚠️  Skipping (no visible frames)")
             return None
+
+        if skipped_missing_coords > 0:
+            print(f"   ℹ️  Skipped {skipped_missing_coords} visible frames without head coordinates")
         
         return df
     
     except Exception as e:
         print(f"   ⚠️  Error reading file: {e}")
         return None
+
+
+def allocate_frame_budgets(video_items, target_total_frames):
+    """Allocate per-video frame budgets with a global cap."""
+    if not video_items:
+        return []
+
+    total_visible = sum(len(item['df']) for item in video_items)
+    if total_visible <= 0:
+        for item in video_items:
+            item['budget'] = 0
+        return video_items
+
+    # If dataset is already smaller than target, keep all frames.
+    if total_visible <= target_total_frames:
+        for item in video_items:
+            item['budget'] = len(item['df'])
+        return video_items
+
+    # Proportional allocation with at least 1 frame per video.
+    base = []
+    for item in video_items:
+        proportional = int(round(len(item['df']) / total_visible * target_total_frames))
+        budget = max(1, min(len(item['df']), proportional, MAX_FRAMES_PER_VIDEO))
+        item['budget'] = budget
+        base.append(item)
+
+    # Adjust to match target_total_frames after rounding and per-video clipping.
+    current = sum(item['budget'] for item in base)
+    if current < target_total_frames:
+        # Add frames to videos with remaining capacity.
+        for item in sorted(base, key=lambda x: len(x['df']) - x['budget'], reverse=True):
+            if current >= target_total_frames:
+                break
+            capacity = min(len(item['df']), MAX_FRAMES_PER_VIDEO) - item['budget']
+            if capacity <= 0:
+                continue
+            add = min(capacity, target_total_frames - current)
+            item['budget'] += add
+            current += add
+    elif current > target_total_frames:
+        # Remove frames from videos with the largest budgets first.
+        for item in sorted(base, key=lambda x: x['budget'], reverse=True):
+            if current <= target_total_frames:
+                break
+            removable = item['budget'] - 1
+            if removable <= 0:
+                continue
+            drop = min(removable, current - target_total_frames)
+            item['budget'] -= drop
+            current -= drop
+
+    return base
 
 
 # ── Extract labeled frames ─────────────────────────────────────────────────────
@@ -230,29 +294,41 @@ def create_dlc_project():
 
 def create_config_yaml(project_dir, video_paths):
     """Create DeepLabCut config.yaml file."""
+
+    video_sets = {}
+    for video_path in video_paths:
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open video to read dimensions: {video_path}")
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+
+        if width <= 0 or height <= 0:
+            raise RuntimeError(f"Invalid video dimensions for {video_path}: {width}x{height}")
+
+        video_sets[str(video_path)] = {'crop': f'0, {width}, 0, {height}'}
     
     config = {
         'Task': PROJECT_NAME,
         'scorer': EXPERIMENTER,
         'date': datetime.now().strftime('%b%d'),
         'project_path': str(project_dir),
+        'engine': 'pytorch',
         
         # Single bodypart: monkey centroid
         'bodyparts': [BODYPART],
         'skeleton': [],  # no skeleton connections for single point
         
         # Video settings
-        'video_sets': {
-            str(v): {'crop': '0, 1920, 0, 1080'}  # 4K video
-            for v in video_paths
-        },
+        'video_sets': video_sets,
         
         # Training parameters
         'TrainingFraction': [TRAIN_FRACTION],
         'iteration': 0,
         'default_net_type': 'resnet_50',
         'snapshotindex': -1,
-        'batch_size': 8,
+        'batch_size': 32,
         
         # Data augmentation
         'multianimalproject': False,
@@ -274,7 +350,48 @@ def create_config_yaml(project_dir, video_paths):
     return config_path
 
 
-def convert_to_dlc_format(extracted_frames, output_dir):
+def build_dlc_dataframe(extracted_frames, include_folder_in_index=True):
+    """Build DLC-format dataframe from extracted frame tuples."""
+    records = []
+    for img_path, frame_num, x, y in extracted_frames:
+        if include_folder_in_index:
+            image_idx = f"labeled-data/{img_path.parent.name}/{img_path.name}"
+        else:
+            image_idx = img_path.name
+        records.append({
+            'image': image_idx,
+            f'{EXPERIMENTER}_{BODYPART}_x': x,
+            f'{EXPERIMENTER}_{BODYPART}_y': y,
+            '_folder': img_path.parent.name,
+        })
+
+    df = pd.DataFrame(records)
+    df = df.set_index('image')
+
+    # Create MultiIndex columns (scorer, bodypart, coords)
+    columns = pd.MultiIndex.from_tuples([
+        (EXPERIMENTER, BODYPART, 'x'),
+        (EXPERIMENTER, BODYPART, 'y'),
+    ], names=['scorer', 'bodyparts', 'coords'])
+
+    value_df = df[[f'{EXPERIMENTER}_{BODYPART}_x', f'{EXPERIMENTER}_{BODYPART}_y']].copy()
+    value_df.columns = columns
+    return value_df, df['_folder']
+
+
+def ensure_multiindex_rows(df, folder_series):
+    """Ensure row index is DLC-compatible: ('labeled-data', 'folder/image')."""
+    image_names = [Path(str(idx)).name for idx in df.index]
+    folder_vals = [str(v) for v in folder_series]
+    level0 = ['labeled-data'] * len(image_names)
+    level1 = [f"{folder}/{img}" for folder, img in zip(folder_vals, image_names)]
+    mi = pd.MultiIndex.from_arrays([level0, level1], names=['set', 'image'])
+    out = df.copy()
+    out.index = mi
+    return out
+
+
+def convert_to_dlc_format(extracted_frames, project_dir, output_dir):
     """
     Convert manual labels to DeepLabCut HDF5 format.
     
@@ -286,37 +403,36 @@ def convert_to_dlc_format(extracted_frames, output_dir):
     Index: relative image paths
     """
     
-    # Build records
-    records = []
-    for img_path, frame_num, x, y in extracted_frames:
-        # DLC uses relative paths from project root
-        rel_path = f"labeled-data/{img_path.parent.name}/{img_path.name}"
-        records.append({
-            'image': rel_path,
-            f'{EXPERIMENTER}_{BODYPART}_x': x,
-            f'{EXPERIMENTER}_{BODYPART}_y': y,
-        })
-    
-    df = pd.DataFrame(records)
-    df = df.set_index('image')
-    
-    # Create MultiIndex columns (scorer, bodypart, coords)
-    columns = pd.MultiIndex.from_tuples([
-        (EXPERIMENTER, BODYPART, 'x'),
-        (EXPERIMENTER, BODYPART, 'y'),
-    ], names=['scorer', 'bodyparts', 'coords'])
-    
-    df.columns = columns
-    
-    # Save as HDF5 (DLC format)
+    # Combined table for inspection and tooling
+    df, folders = build_dlc_dataframe(extracted_frames, include_folder_in_index=True)
+
+    # Use MultiIndex rows for compatibility with DLC dataset builder.
+    combined_df = ensure_multiindex_rows(df, folders)
+
     h5_path = output_dir / f'CollectedData_{EXPERIMENTER}.h5'
-    df.to_hdf(h5_path, key='df_with_missing', mode='w')
-    
-    # Also save CSV for inspection
+    combined_df.to_hdf(h5_path, key='df_with_missing', mode='w')
+
     csv_path = output_dir / f'CollectedData_{EXPERIMENTER}.csv'
-    df.to_csv(csv_path)
-    
+    combined_df.to_csv(csv_path)
+
+    # Per-folder annotation files expected by deeplabcut.create_training_dataset
+    folder_count = 0
+    for folder in sorted(folders.unique()):
+        folder_mask = folders == folder
+        folder_df = df.loc[folder_mask].copy()
+        folder_folders = folders.loc[folder_mask]
+        folder_df = ensure_multiindex_rows(folder_df, folder_folders)
+
+        folder_dir = project_dir / 'labeled-data' / folder
+        folder_h5 = folder_dir / f'CollectedData_{EXPERIMENTER}.h5'
+        folder_csv = folder_dir / f'CollectedData_{EXPERIMENTER}.csv'
+
+        folder_df.to_hdf(folder_h5, key='df_with_missing', mode='w')
+        folder_df.to_csv(folder_csv)
+        folder_count += 1
+
     print(f"✅  Converted {len(df)} labels → {h5_path}")
+    print(f"✅  Wrote per-folder annotation files in {folder_count} labeled-data folders")
     return h5_path
 
 
@@ -350,66 +466,83 @@ def main():
         return
     print(f"   Project: {project_dir}")
     
-    # 3. Process each labeled video
-    print("\n3. Extracting labeled frames...")
-    print(f"   ⏱️  This may take 10-30 minutes for HEVC videos (sequential reading required)")
-    
-    all_extracted = []
-    video_paths = []
-    
-    import time
-    start_time = time.time()
-    
+    # 3. Prepare per-video label pools and global frame budgets
+    print("\n3. Preparing frame pools and global sampling budgets...")
+    video_items = []
     for i, csv_path in enumerate(csv_files, 1):
         print(f"\n   [{i}/{len(csv_files)}] Processing: {csv_path.name}")
-        
-        # Load labels
         df = load_labels(csv_path)
         if df is None or len(df) == 0:
             continue
-        
+
         print(f"   - {len(df)} visible monkey frames")
-        
-        # Find corresponding video in multiple directories
+
         video_file = df['video_file'].iloc[0]
         video_path = None
-        
         for video_dir in VIDEO_DIRS:
             if not video_dir.exists():
                 continue
-            
-            # Try direct match first
+
             direct_path = video_dir / video_file
             if direct_path.exists():
                 video_path = direct_path
                 break
-            
-            # Try recursive search
+
             for vp in video_dir.rglob(video_file):
                 video_path = vp
                 break
-            
+
             if video_path:
                 break
-        
+
         if not video_path or not video_path.exists():
             print(f"   ⚠️  Video not found: {video_file}")
             print(f"      Searched in: {[str(d) for d in VIDEO_DIRS if d.exists()]}")
             continue
-        
+
+        video_items.append({'csv_path': csv_path, 'df': df, 'video_path': video_path})
+
+    if not video_items:
+        print("❌ No valid videos with labels found!")
+        return
+
+    total_visible = sum(len(item['df']) for item in video_items)
+    video_items = allocate_frame_budgets(video_items, TARGET_TOTAL_FRAMES)
+    planned_total = sum(item['budget'] for item in video_items)
+
+    print("\n   Sampling plan:")
+    print(f"   - Total visible labeled frames: {total_visible}")
+    print(f"   - Target total frames: {TARGET_TOTAL_FRAMES}")
+    print(f"   - Planned extracted frames: {planned_total}")
+    print(f"   - Per-video cap: {MAX_FRAMES_PER_VIDEO}")
+
+    # 4. Extract frames according to global budgets
+    print("\n4. Extracting labeled frames...")
+    print("   ⏱️  This may take 10-30 minutes for HEVC videos (sequential reading required)")
+
+    all_extracted = []
+    video_paths = []
+
+    import time
+    start_time = time.time()
+
+    for i, item in enumerate(video_items, 1):
+        video_path = item['video_path']
+        df = item['df']
+        budget = item['budget']
+
         video_paths.append(video_path)
-        
-        # Extract frames
+        print(f"\n   [{i}/{len(video_items)}] {video_path.name}")
+        print(f"   - Visible frames: {len(df)} | Budget: {budget}")
+
         video_label_dir = project_dir / 'labeled-data' / video_path.stem
-        extracted = extract_labeled_frames(df, video_path, video_label_dir, 
-                                          max_frames=MAX_FRAMES_PER_VIDEO)
+        extracted = extract_labeled_frames(df, video_path, video_label_dir, max_frames=budget)
         all_extracted.extend(extracted)
         print(f"   ✅ Extracted {len(extracted)} frames → {video_label_dir.name}")
-        
-        # Progress estimate
+
         elapsed = time.time() - start_time
         avg_time = elapsed / i
-        remaining = avg_time * (len(csv_files) - i)
+        remaining = avg_time * (len(video_items) - i)
         print(f"   ⏱️  Elapsed: {elapsed/60:.1f}m | Est. remaining: {remaining/60:.1f}m")
     
     elapsed_total = time.time() - start_time
@@ -420,18 +553,18 @@ def main():
     
     print(f"\n   ✅ Total frames extracted: {len(all_extracted)} in {elapsed_total/60:.1f} minutes")
     
-    # 4. Create config.yaml
-    print("\n4. Creating config.yaml...")
+    # 5. Create config.yaml
+    print("\n5. Creating config.yaml...")
     config_path = create_config_yaml(project_dir, video_paths)
     print(f"   Config: {config_path}")
     
-    # 5. Convert labels to DLC format
-    print("\n5. Converting labels to DeepLabCut format...")
+    # 6. Convert labels to DLC format
+    print("\n6. Converting labels to DeepLabCut format...")
     training_dir = project_dir / 'training-datasets' / 'iteration-0'
     training_dir.mkdir(parents=True, exist_ok=True)
-    h5_path = convert_to_dlc_format(all_extracted, training_dir)
+    h5_path = convert_to_dlc_format(all_extracted, project_dir, training_dir)
     
-    # 6. Summary and next steps
+    # 7. Summary and next steps
     print("\n" + "=" * 70)
     print("✅ DeepLabCut Project Setup Complete!")
     print("=" * 70)

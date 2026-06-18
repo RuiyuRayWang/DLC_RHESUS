@@ -28,7 +28,7 @@ Cage height: 105 cm.  Cage top corners share the same (x, y) as the floor
 corners but have z = 105.
 
 Usage:
-    conda activate video_tracking
+    conda activate deeplabcut
     python scripts/calibrate_cameras.py               # interactive camera pick
     python scripts/calibrate_cameras.py --camera D1
     python scripts/calibrate_cameras.py --all         # all 4 cameras
@@ -69,9 +69,8 @@ CAGE_Z      = 105   # cm  (cage wall height)
 
 FPS         = 20.0
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-VIDEO_BASE  = PROJECT_ROOT / 'data' / 'oft_rhp' / 'H1705011' / '2026-05-25'
-OUTPUT_DIR  = PROJECT_ROOT / 'results' / 'calibration'
+VIDEO_BASE  = Path('/home/luolab/PROJECTS/PAL_ENHANCER/data/oft_rhp/H1705011/2026-05-25')
+OUTPUT_DIR  = Path('/home/luolab/PROJECTS/PAL_ENHANCER/results/calibration')
 
 DISPLAY_SCALE = 0.35    # 3840×2160 * 0.35 ≈ 1344×756
 SIDEBAR_W     = 430     # px — right-side info panel
