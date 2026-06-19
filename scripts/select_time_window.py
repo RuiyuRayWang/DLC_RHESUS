@@ -8,6 +8,7 @@ Shows a split view:
 
 Controls:
     - Drag the slider to move the center of the time window
+    - Edit the start-time box to set window start time in seconds
     - Edit the duration box to change the fixed window width
   - Press 'S' or click "Save window" to write the selection to JSON
   - Press 'R' to reset to the full session
@@ -53,6 +54,7 @@ SESSION_DATE  = '2026-05-25'
 ARENA_SIZE    = 322   # cm
 VELOCITY_THRESHOLD = 5.0
 MIN_BOUT_DURATION = 0.5
+MISSING_GAP_THRESHOLD_SEC = 1.0
 
 
 # ── Arena background ───────────────────────────────────────────────────────────
@@ -113,6 +115,21 @@ def _detect_bouts(df: pd.DataFrame,
     return pd.DataFrame(bouts)
 
 
+def _find_missing_spans(time_sec: pd.Series,
+                        gap_threshold_sec: float = MISSING_GAP_THRESHOLD_SEC) -> list[tuple[float, float]]:
+    """Return (start_sec, end_sec) spans where trajectory timestamps have long gaps."""
+    if time_sec.empty:
+        return []
+
+    ts = pd.Series(time_sec).sort_values().reset_index(drop=True)
+    diffs = ts.diff()
+    spans: list[tuple[float, float]] = []
+    for i in range(1, len(ts)):
+        if float(diffs.iloc[i]) > gap_threshold_sec:
+            spans.append((float(ts.iloc[i - 1]), float(ts.iloc[i])))
+    return spans
+
+
 # ── Main app ───────────────────────────────────────────────────────────────────
 
 def run(monkey_id: str, session_date: str):
@@ -126,6 +143,7 @@ def run(monkey_id: str, session_date: str):
 
     traj = pd.read_csv(traj_path)
     traj['absolute_time'] = pd.to_datetime(traj['absolute_time'])
+    missing_spans_sec = _find_missing_spans(traj['time_sec'])
 
     t_min  = traj['time_sec'].min()
     t_max  = traj['time_sec'].max()
@@ -136,13 +154,14 @@ def run(monkey_id: str, session_date: str):
     fig.canvas.manager.set_window_title(
         f"OFT Time Window Selector — {monkey_id} / {session_date}")
 
-    # Axes arrangement:  arena | velocity series + slider + duration + buttons
+    # Axes arrangement: arena | velocity + slider + start/duration + buttons
     ax_arena  = fig.add_axes([0.04, 0.14, 0.40, 0.78])   # trajectory map
     ax_vel    = fig.add_axes([0.50, 0.56, 0.47, 0.34])   # velocity time series
     ax_slider = fig.add_axes([0.50, 0.41, 0.47, 0.05])   # center slider
-    ax_dur    = fig.add_axes([0.50, 0.31, 0.14, 0.055])  # duration box
-    ax_save   = fig.add_axes([0.67, 0.31, 0.14, 0.055])  # save button
-    ax_reset  = fig.add_axes([0.83, 0.31, 0.14, 0.055])  # reset button
+    ax_start  = fig.add_axes([0.50, 0.31, 0.12, 0.055])  # start-sec box
+    ax_dur    = fig.add_axes([0.64, 0.31, 0.12, 0.055])  # duration box
+    ax_save   = fig.add_axes([0.78, 0.31, 0.09, 0.055])  # save button
+    ax_reset  = fig.add_axes([0.88, 0.31, 0.09, 0.055])  # reset button
     ax_info   = fig.add_axes([0.50, 0.06, 0.47, 0.20])   # stats text
     ax_info.axis('off')
 
@@ -151,6 +170,20 @@ def run(monkey_id: str, session_date: str):
     ax_vel.plot(ds['time_sec'] / 60, ds['velocity_cm_s'],
                 color='#bbbbbb', lw=0.6, zorder=1)
     ax_vel.axhline(5, color='salmon', lw=1, ls='--', alpha=0.6, label='5 cm/s threshold')
+
+    # Mark long timeline gaps as likely missing video periods.
+    missing_label_used = False
+    for start_sec, end_sec in missing_spans_sec:
+        ax_vel.axvspan(
+            start_sec / 60,
+            end_sec / 60,
+            color='red',
+            alpha=0.18,
+            zorder=0,
+            label='missing video' if not missing_label_used else None,
+        )
+        missing_label_used = True
+
     ax_vel.set_xlabel('Time (min)', fontsize=9)
     ax_vel.set_ylabel('Velocity (cm/s)', fontsize=9)
     ax_vel.set_title('Velocity — move fixed-width window with slider', fontsize=10)
@@ -171,6 +204,8 @@ def run(monkey_id: str, session_date: str):
                     t_min / 60, t_max / 60,
                     valinit=default_center_min,
                     color='steelblue')
+    start_box = TextBox(ax_start, 'Start (s)',
+                        initial=f'{max(t_min, default_center_min * 60 - default_duration_min * 30):.1f}')
     duration_box = TextBox(ax_dur, 'Duration (min)',
                            initial=f'{default_duration_min:.1f}')
 
@@ -212,6 +247,8 @@ def run(monkey_id: str, session_date: str):
         state['lo'] = lo
         state['hi'] = hi
         state['duration_min'] = hi_min - lo_min
+        if start_box.text != f"{lo:.1f}":
+            start_box.set_val(f"{lo:.1f}")
 
         sub = traj[(traj['time_sec'] >= lo) & (traj['time_sec'] <= hi)]
         if sub.empty:
@@ -279,7 +316,24 @@ def run(monkey_id: str, session_date: str):
             duration_box.set_val(f"{duration_min:.1f}")
         _refresh(slider.val, duration_min)
 
+    def _on_start_submit(text):
+        try:
+            start_sec = float(text)
+        except ValueError:
+            start_box.set_val(f"{state['lo']:.1f}")
+            return
+
+        duration_sec = state['duration_min'] * 60
+        max_start = max(t_max - duration_sec, t_min)
+        start_sec = max(t_min, min(start_sec, max_start))
+        center_min = (start_sec + duration_sec / 2) / 60
+
+        if abs(start_sec - state['lo']) > 1e-9:
+            start_box.set_val(f"{start_sec:.1f}")
+        slider.set_val(center_min)
+
     duration_box.on_submit(_on_duration_submit)
+    start_box.on_submit(_on_start_submit)
 
     # ── Buttons ────────────────────────────────────────────────────────────────
     btn_save  = Button(ax_save,  'Save window', color='#c8e6c9', hovercolor='#a5d6a7')
@@ -287,10 +341,14 @@ def run(monkey_id: str, session_date: str):
 
     def _save(_):
         lo, hi = state['lo'], state['hi']
+        window_duration_sec = float(max(0.0, hi - lo))
         sub = traj[(traj['time_sec'] >= lo) & (traj['time_sec'] <= hi)]
         bouts = _detect_bouts(sub) if not sub.empty else pd.DataFrame(columns=['duration_sec'])
         moving = sub['velocity_cm_s'] > VELOCITY_THRESHOLD if not sub.empty else pd.Series(dtype=bool)
         mean_velocity_moving = float(sub.loc[moving, 'velocity_cm_s'].mean()) if not sub.empty and moving.any() else 0.0
+        total_active_time = float(bouts['duration_sec'].sum()) if len(bouts) > 0 else 0.0
+        total_active_time = min(total_active_time, window_duration_sec)
+        immobility_time = max(0.0, window_duration_sec - total_active_time)
         t0  = sub['absolute_time'].iloc[0].isoformat() if not sub.empty else ''
         t1  = sub['absolute_time'].iloc[-1].isoformat() if not sub.empty else ''
         result = {
@@ -306,7 +364,8 @@ def run(monkey_id: str, session_date: str):
             'max_velocity_cm_s': round(float(sub['velocity_cm_s'].max()), 3) if not sub.empty else 0.0,
             'n_movement_bouts': int(len(bouts)),
             'mean_bout_duration_sec': round(float(bouts['duration_sec'].mean()), 3) if len(bouts) > 0 else 0.0,
-            'total_active_time_sec': round(float(bouts['duration_sec'].sum()), 2) if len(bouts) > 0 else 0.0,
+            'total_active_time_sec': round(total_active_time, 2),
+            'immobility_time_sec': round(immobility_time, 2),
             'velocity_threshold_cm_s': VELOCITY_THRESHOLD,
         }
         with open(out_path, 'w') as f:
@@ -320,6 +379,7 @@ def run(monkey_id: str, session_date: str):
         state['duration_min'] = default_duration_min
         duration_box.set_val(f'{default_duration_min:.1f}')
         slider.set_val(default_center_min)
+        start_box.set_val(f'{state["lo"]:.1f}')
         ax_save.set_facecolor('#c8e6c9')
         fig.canvas.draw_idle()
 
