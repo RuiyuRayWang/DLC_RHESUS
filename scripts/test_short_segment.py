@@ -2,6 +2,8 @@
 """
 Test script: Run inference on a short segment of video (~300 frames)
 and save predictions for visual examination.
+
+Minimal template for running DeepLabCut batch inference.
 """
 
 import cv2
@@ -15,8 +17,8 @@ import shutil
 import argparse
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = PROJECT_ROOT / 'deeplabcut_projects' / 'monkey_oft_tracking-luolab-2026-06-17' / 'config.yaml'
-VIDEO_PATH = '/media/luolab/memcore/oft_rhp/H1705011/D02_20260525161934.mp4'
+CONFIG_PATH = PROJECT_ROOT / 'deeplabcut_projects' / 'monkey_oft_tracking_D1-luolab-2026-06-19' / 'config.yaml'
+VIDEO_PATH = '/home/ray/DLC_RHESUS/data/oft_rhp/H1705011/2026-06-17/D01_20260617131918.mp4'
 NUM_FRAMES = 100
 START_FRAME = 0
 
