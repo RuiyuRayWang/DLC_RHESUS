@@ -15,6 +15,7 @@ vignettes/
 notebook/
 notebooks/
 tmp/
+deeplabcut_projects/
 
 # R project files
 .Rhistory
