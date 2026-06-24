@@ -83,8 +83,8 @@ Additional improvements applied:
 The scripts now work normally:
 
 ```bash
-conda activate deeplabcut
-cd /home/luolab/PROJECTS/PAL_ENHANCER
+conda activate dlc
+cd /home/luolab/PROJECTS/DLC_RHESUS
 
 # Camera calibration
 python scripts/calibrate_cameras.py --camera D2 --frame-sec 30

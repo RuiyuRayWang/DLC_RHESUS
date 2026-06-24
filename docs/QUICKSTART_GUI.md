@@ -5,7 +5,7 @@
 ## Step 0: Create the environment (first time only)
 
 ```bash
-cd /Users/ray/PROJECTS/PAL_ENHANCER
+cd /Users/ray/PROJECTS/DLC_RHESUS
 bash scripts/setup_video_tracking_env.sh
 conda activate video_tracking
 ```
@@ -15,7 +15,7 @@ conda activate video_tracking
 Open a terminal and run:
 
 ```bash
-cd /Users/ray/PROJECTS/PAL_ENHANCER
+cd /Users/ray/PROJECTS/DLC_RHESUS
 conda activate video_tracking
 python scripts/calibrate_cameras.py --camera D2 --frame-sec 30
 ```

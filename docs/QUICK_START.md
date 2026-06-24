@@ -27,7 +27,7 @@ ffmpeg: 8.1.1
 
 Open and run the analysis notebook:
 ```bash
-cd /home/luolab/PROJECTS/PAL_ENHANCER
+cd /home/luolab/PROJECTS/DLC_RHESUS
 conda activate deeplabcut
 jupyter lab notebooks/oft_video_analysis.ipynb
 ```
@@ -180,10 +180,10 @@ After processing, you'll have:
 
 ```bash
 # Activate environment
-conda activate deeplabcut
+conda activate dlc
 
 # Launch Jupyter
-cd /home/luolab/PROJECTS/PAL_ENHANCER
+cd /home/luolab/PROJECTS/DLC_RHESUS
 jupyter lab
 
 # Open: notebooks/oft_video_analysis.ipynb

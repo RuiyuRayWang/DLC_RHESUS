@@ -42,21 +42,21 @@ VIDEO_DIRS = [
 ]
 
 # DeepLabCut project settings
-PROJECT_NAME = 'monkey_oft_tracking'
+PROJECT_NAME = 'monkey_oft_tracking_D2'
 EXPERIMENTER = 'luolab'
 BODYPART = 'head'  # single point: monkey head
 
 # Training parameters
 TRAIN_FRACTION = 0.95  # use 95% for training, 5% for testing
-TARGET_TOTAL_FRAMES = 4000  # global cap for extracted labeled frames
-MAX_FRAMES_PER_VIDEO = 200  # secondary guardrail per video
+TARGET_TOTAL_FRAMES = 7000  # global cap for extracted labeled frames
+MAX_FRAMES_PER_VIDEO = 600  # secondary guardrail per video
 
 
 # ── Find all labeled CSVs ──────────────────────────────────────────────────────
 
 def load_label_config():
     """Load selected label files from config."""
-    config_path = PROJECT_ROOT / 'deeplabcut_label_config.json'
+    config_path = PROJECT_ROOT / 'deeplabcut_label_config_D2.json'
     
     if not config_path.exists():
         print("❌ No label file configuration found!")
@@ -316,7 +316,7 @@ def create_config_yaml(project_dir, video_paths):
         'project_path': str(project_dir),
         'engine': 'pytorch',
         
-        # Single bodypart: monkey centroid
+        # Single bodypart: monkey head
         'bodyparts': [BODYPART],
         'skeleton': [],  # no skeleton connections for single point
         
@@ -328,7 +328,7 @@ def create_config_yaml(project_dir, video_paths):
         'iteration': 0,
         'default_net_type': 'resnet_50',
         'snapshotindex': -1,
-        'batch_size': 32,
+        'batch_size': 16,
         
         # Data augmentation
         'multianimalproject': False,

@@ -33,9 +33,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--annotations", required=True, help="Path to visibility annotation CSV.",)
     parser.add_argument("--video", required=True, help="Path to source video.",)
     parser.add_argument("--output-dir", default=str(DEFAULT_OUTPUT_DIR), help="Output directory.",)
-    parser.add_argument("--target-fps", type=float, default=5.0, help="Sampling FPS for visible frames.",)
+    parser.add_argument("--target-fps", type=float, default=4.0, help="Sampling FPS for visible frames.",)
     parser.add_argument("--camera", default=None, help="Optional camera filter, e.g. D1. If omitted, inferred from video name.",)
-    parser.add_argument("--keep-pngs", action="store_true", help="Keep extracted PNG frames after rebuilding video.",)
+    parser.add_argument("--threads", type=int, default=0, help="Number of threads for ffmpeg.",)
     return parser.parse_args()
 
 
@@ -164,52 +164,14 @@ def load_visible_intervals_from_csv(
     return merge_intervals(intervals)
 
 
-def timestamp_is_inside_intervals(
-    t: float,
-    intervals: list[tuple[float, float]],
-    interval_idx: int,
-) -> tuple[bool, int]:
-    """
-    Efficient interval membership check for monotonically increasing timestamps.
-    """
-    
-    while interval_idx < len(intervals) and t >= intervals[interval_idx][1]:
-        interval_idx += 1
-    
-    if interval_idx >= len(intervals):
-        return False, interval_idx
-    
-    start, end = intervals[interval_idx]
-    
-    return start <= t < end, interval_idx
-
-
-def extract_visible_pngs_sequential(
+def get_video_info_with_opencv(
     video_path: str | Path,
-    annotation_csv: str | Path,
-    frame_dir: str | Path,
-    target_fps: float,
-    camera: str | None = None,
-) -> tuple[pd.DataFrame, dict[str, float | int] | None]:
+) -> tuple[float, int, int, int]:
     """
-    Sequentially decode the video and write selected visible frames as PNG.
-
-    This avoids random-access seeking, which is unreliable for some HEVC videos.
+    Read basic video metadata with OpenCV.
     """
     
     video_path = Path(video_path)
-    frame_dir = Path(frame_dir)
-    frame_dir.mkdir(parents=True, exist_ok=True)
-    
-    visible_intervals = load_visible_intervals_from_csv(
-        csv_path=annotation_csv,
-        video_file=video_path.name,
-        camera=camera,
-    )
-    
-    if not visible_intervals:
-        print(f"No visible intervals found for {video_path.name}")
-        return pd.DataFrame(), None
     
     cap = cv2.VideoCapture(str(video_path))
     
@@ -221,164 +183,172 @@ def extract_visible_pngs_sequential(
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
-    if source_fps <= 0:
-        cap.release()
-        raise RuntimeError(f"Invalid source FPS for video: {video_path}")
-    
-    print("")
-    print(f"Video: {video_path.name}")
-    print(f"Camera: {camera}")
-    print(f"Resolution: {width} x {height}")
-    print(f"Source FPS: {source_fps:.6f}")
-    print(f"Target FPS: {target_fps:.6f}")
-    print(f"Total frames reported by OpenCV: {total_frames}")
-    print(f"Visible intervals: {visible_intervals}")
-    
-    source_step = 1.0 / source_fps
-    target_step = 1.0 / target_fps
-    
-    saved_idx = 0
-    source_frame_idx = 0
-    interval_idx = 0
-    
-    current_start, _ = visible_intervals[0]
-    next_target_time = current_start
-    
-    records = []
-    
-    while True:
-        ok, frame = cap.read()
-        
-        if not ok:
-            break
-        
-        source_time_sec = source_frame_idx / source_fps
-        
-        inside, interval_idx = timestamp_is_inside_intervals(
-            t=source_time_sec,
-            intervals=visible_intervals,
-            interval_idx=interval_idx,
-        )
-        
-        if interval_idx >= len(visible_intervals):
-            break
-        
-        if inside:
-            current_start, current_end = visible_intervals[interval_idx]
-            
-            if next_target_time < current_start:
-                next_target_time = current_start
-            
-            if next_target_time < current_end:
-                should_save = source_time_sec + 0.5 * source_step >= next_target_time
-            else:
-                should_save = False
-            
-            if should_save:
-                frame_name = f"frame_{saved_idx:06d}.png"
-                frame_path = frame_dir / frame_name
-                
-                cv2.imwrite(str(frame_path), frame)
-                
-                records.append(
-                    {
-                        "rebuilt_frame": saved_idx,
-                        "camera": camera,
-                        "source_video": video_path.name,
-                        "source_frame": source_frame_idx,
-                        "source_time_sec": source_time_sec,
-                        "target_time_sec": next_target_time,
-                        "visible_interval_start": current_start,
-                        "visible_interval_end": current_end,
-                        "frame_file": str(frame_path),
-                    }
-                )
-                
-                saved_idx += 1
-                next_target_time += target_step
-        
-        source_frame_idx += 1
-        
-        if source_frame_idx % 5000 == 0:
-            print(
-                f"Decoded {source_frame_idx} source frames; "
-                f"saved {saved_idx} visible frames"
-            )
-    
     cap.release()
     
-    metadata = pd.DataFrame(records)
+    if source_fps <= 0:
+        raise RuntimeError(f"Invalid FPS for video: {video_path}")
     
-    video_info = {
-        "source_fps": source_fps,
-        "target_fps": target_fps,
-        "width": width,
-        "height": height,
-        "total_frames": total_frames,
-    }
-    
-    print("")
-    print(f"Finished decoding: {video_path.name}")
-    print(f"Saved visible PNG frames: {len(metadata)}")
-    
-    return metadata, video_info
+    return source_fps, total_frames, width, height
 
 
-def create_video_from_pngs(
-    frame_dir: str | Path,
+def build_ffmpeg_visible_filter(
+    intervals: list[tuple[float, float]],
+    target_fps: float,
+) -> str:
+    """
+    Build an ffmpeg video filter that:
+    1. samples the video at target_fps,
+    2. keeps only frames inside visible intervals,
+    3. resets timestamps for a continuous output video.
+    """
+    
+    if not intervals:
+        raise ValueError("No visible intervals provided")
+    
+    conditions = [
+        f"between(t\\,{start:.6f}\\,{end:.6f})"
+        for start, end in intervals
+    ]
+    
+    select_expr = "+".join(conditions)
+    
+    return (
+        f"fps={target_fps},"
+        f"select='{select_expr}',"
+        f"setpts=N/({target_fps}*TB)"
+    )
+
+
+def generate_visible_frame_metadata(
+    video_path: str | Path,
+    intervals: list[tuple[float, float]],
+    source_fps: float,
+    total_frames: int,
+    target_fps: float,
+    camera: str,
+) -> pd.DataFrame:
+    """
+    Generate mapping from rebuilt video frames back to source video time/frame.
+
+    Assumes constant-frame-rate source video.
+    """
+    
+    video_path = Path(video_path)
+    
+    duration_sec = total_frames / source_fps
+    target_step = 1.0 / target_fps
+    
+    records = []
+    rebuilt_frame = 0
+    
+    for start, end in intervals:
+        clamped_start = max(start, 0.0)
+        clamped_end = min(end, duration_sec)
+        
+        if clamped_start >= clamped_end:
+            continue
+        
+        t = clamped_start
+        
+        while t < clamped_end:
+            source_frame = int(round(t * source_fps))
+            
+            if source_frame >= total_frames:
+                break
+            
+            records.append(
+                {
+                    "rebuilt_frame": rebuilt_frame,
+                    "camera": camera,
+                    "source_video": video_path.name,
+                    "source_frame": source_frame,
+                    "source_time_sec": t,
+                    "target_time_sec": t,
+                    "visible_interval_start": start,
+                    "visible_interval_end": end,
+                }
+            )
+            
+            rebuilt_frame += 1
+            t += target_step
+    
+    return pd.DataFrame(records)
+
+
+def create_visible_video_with_ffmpeg(
+    video_path: str | Path,
     output_video: str | Path,
-    fps: float,
+    intervals: list[tuple[float, float]],
+    target_fps: float,
+    crf: int = 18,
+    preset: str = "fast",
+    threads: int = 0,
 ) -> Path:
     """
-    Rebuild a DLC-compatible H.264 MP4 from sequential PNG frames.
+    Create a DLC-ready visible-frame H.264 video directly from the source video.
+
+    This avoids writing intermediate PNG frames.
     """
     
-    frame_dir = Path(frame_dir)
+    video_path = Path(video_path)
     output_video = Path(output_video)
+    output_video.parent.mkdir(parents=True, exist_ok=True)
     
-    frame_pattern = str(frame_dir / "frame_%06d.png")
+    vf = build_ffmpeg_visible_filter(
+        intervals=intervals,
+        target_fps=target_fps,
+    )
     
     cmd = [
         "ffmpeg",
         "-y",
-        "-framerate",
-        str(fps),
         "-i",
-        frame_pattern,
+        str(video_path),
+        "-vf",
+        vf,
+        "-an",
         "-c:v",
         "libx264",
         "-pix_fmt",
         "yuv420p",
         "-preset",
-        "fast",
+        preset,
         "-crf",
-        "18",
+        str(crf),
+        "-threads",
+        str(threads),
         str(output_video),
     ]
     
     print("")
-    print("Creating rebuilt H.264 video:")
+    print("Creating visible H.264 video directly with ffmpeg:")
     print(" ".join(cmd))
     
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+    )
     
     if result.returncode != 0:
         print(result.stderr)
-        raise RuntimeError("ffmpeg failed while creating rebuilt video")
+        raise RuntimeError("ffmpeg failed while creating visible video")
     
     return output_video
 
 
-def preprocess_video(
+def preprocess_video_direct_ffmpeg(
     video_path: str | Path,
     annotation_csv: str | Path,
     output_dir: str | Path,
     target_fps: float,
     camera: str | None = None,
-    keep_pngs: bool = False,
+    threads: int = 0,
 ) -> Path:
     """
-    Preprocess one video into a DLC-ready H.264 clip and metadata CSV.
+    Preprocess one video using ffmpeg directly.
+
+    This avoids Python/OpenCV frame extraction and avoids intermediate PNG files.
     """
     
     video_path = Path(video_path)
@@ -389,43 +359,56 @@ def preprocess_video(
         camera = infer_camera_from_name(video_path)
     
     video_out_dir = output_dir / video_path.stem
-    frame_dir = video_out_dir / "frames"
+    video_out_dir.mkdir(parents=True, exist_ok=True)
+    
+    intervals = load_visible_intervals_from_csv(
+        csv_path=annotation_csv,
+        video_file=video_path.name,  # BASE NAME
+        camera=camera,
+    )
+    
+    if not intervals:
+        raise RuntimeError(f"No visible intervals found for {video_path.name}")
+    
+    source_fps, total_frames, width, height = get_video_info_with_opencv(video_path)
+    
     rebuilt_video = video_out_dir / f"{video_path.stem}_visible_h264.mp4"
     metadata_csv = video_out_dir / "visible_frame_metadata.csv"
     info_csv = video_out_dir / "video_info.csv"
     
-    video_out_dir.mkdir(parents=True, exist_ok=True)
-    
-    metadata, video_info = extract_visible_pngs_sequential(
+    create_visible_video_with_ffmpeg(
         video_path=video_path,
-        annotation_csv=annotation_csv,
-        frame_dir=frame_dir,
+        output_video=rebuilt_video,
+        intervals=intervals,
+        target_fps=target_fps,
+        crf=18,
+        preset="fast",
+        threads=0,
+    )
+    
+    metadata = generate_visible_frame_metadata(
+        video_path=video_path,
+        intervals=intervals,
+        source_fps=source_fps,
+        total_frames=total_frames,
         target_fps=target_fps,
         camera=camera,
     )
     
-    if metadata.empty:
-        raise RuntimeError(f"No visible frames extracted for {video_path.name}")
-    
-    metadata.to_csv(metadata_csv, index=False)
-    
-    if video_info is not None:
-        pd.DataFrame([video_info]).to_csv(info_csv, index=False)
-    
-    create_video_from_pngs(
-        frame_dir=frame_dir,
-        output_video=rebuilt_video,
-        fps=target_fps,
+    video_info = pd.DataFrame(
+        [
+            {
+                "source_fps": source_fps,
+                "target_fps": target_fps,
+                "width": width,
+                "height": height,
+                "total_frames": total_frames,
+            }
+        ]
     )
     
-    if not keep_pngs:
-        for png_path in frame_dir.glob("frame_*.png"):
-            png_path.unlink()
-
-        try:
-            frame_dir.rmdir()
-        except OSError:
-            pass
+    metadata.to_csv(metadata_csv, index=False)
+    video_info.to_csv(info_csv, index=False)
     
     print("")
     print(f"Saved rebuilt video: {rebuilt_video}")
@@ -438,13 +421,13 @@ def preprocess_video(
 def main() -> None:
     args = parse_args()
     
-    preprocess_video(
+    preprocess_video_direct_ffmpeg(
         video_path=args.video,
         annotation_csv=args.annotations,
         output_dir=args.output_dir,
         target_fps=args.target_fps,
         camera=args.camera,
-        keep_pngs=args.keep_pngs,
+        threads=args.threads,
     )
 
 

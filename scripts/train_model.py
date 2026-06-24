@@ -16,12 +16,12 @@ import argparse
 
 # Configuration
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = PROJECT_ROOT / 'deeplabcut_projects' / 'monkey_oft_tracking-luolab-2026-06-17' / 'config.yaml'
+CONFIG_PATH = PROJECT_ROOT / 'deeplabcut_projects' / 'monkey_oft_tracking_D3-luolab-2026-06-19' / 'config.yaml'
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train DLC model with quick/full modes.')
-    parser.add_argument('--mode', choices=['quick', 'full'], default='quick',
+    parser.add_argument('--mode', choices=['quick', 'full'], default='full',
                         help='quick: fast convergence check (~20 epochs), full: full run (~50 epochs)')
     parser.add_argument('--crop-size', type=int, default=384,
                         help='Training crop size (default: 384, was 448)')
@@ -148,7 +148,7 @@ def main():
         target_epochs = 20
         milestones = [12, 18]
     else:
-        target_epochs = 70
+        target_epochs = 50
         milestones = [30, 45]
     
     # Optimize for faster training

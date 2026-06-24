@@ -91,8 +91,6 @@ Notebook: oft_video_analysis.ipynb
 | `scripts/calibrate_cameras.py` | Interactive OpenCV GUI to label known arena corners in a reference frame; computes floor homography (pixel → cm) and optionally full camera model via solvePnP | ✅ Done |
 | `scripts/manual_labeler.py` | Frame-by-frame OpenCV labeling tool; camera-aware; supports "no monkey visible" marking; resumable sessions | ✅ Done |
 | `scripts/fuse_trajectories.py` | Fuses per-camera CSVs into a single real-world trajectory; averages boundary-overlap frames; interpolates short gaps; computes velocity and movement bouts | ✅ Done |
-| `scripts/sam_segmentation.py` | SAM-based automatic segmentation (Segment Anything Model vit_b) — evaluated and **abandoned** due to cage interference | ⚠ Deprecated |
-| `scripts/test_segmentation_tuning.py` | Classical CV segmentation test harness — also evaluated and superseded by manual labeling | ⚠ Deprecated |
 
 ### Notebook: `notebooks/oft_video_analysis.ipynb`
 
@@ -109,15 +107,6 @@ Notebook: oft_video_analysis.ipynb
 | 7. Behavioral metrics | Velocity, bouts, immobility from pixel-based trajectory | ✅ (pixel units) |
 | 8. Batch processing | Loop all videos, save metrics CSV | ✅ |
 | 9–10. Temporal analysis / Export | Trends over time, JSON summary | ✅ |
-
-> **TODO:** add a notebook section that loads `trajectory_realworld.csv` and plots the arena-space heatmap and cm-unit behavioral metrics.
-
-### Test Clips
-
-| File | Source | Content |
-|------|--------|---------|
-| `data/oft_rhp/H1705011/2026-05-25/test_clips/D02_20260525161934_1min.mp4` | D02 video | Original test clip (monkey partially behind cage bar) |
-| `data/oft_rhp/H1705011/2026-05-25/test_clips/D03_20260525170340_1min.mp4` | D03 video @ 8′13″–9′13″ | New clip where monkey is clearly visible |
 
 ---
 
@@ -140,7 +129,7 @@ the monkey.
 ### Why homography (not full 3D calibration) is the primary approach
 A 3×3 floor homography is sufficient because:
 - We only care about the monkey's position **on the floor** (z = 0)
-- The monkey's body centre approximates the floor contact point
+- The monkey's head approximates the position of the monkey
 - A homography directly maps pixel → cm without knowing camera intrinsics
 
 The full `solvePnP` model (estimated when cage-top corners are also labeled)
@@ -186,8 +175,8 @@ See [QT_SUBPROCESS_FIX.md](QT_SUBPROCESS_FIX.md) for details on the Qt6 subproce
 
 ```bash
 # ✅ Correct way: Activate environment first
-conda activate deeplabcut
-cd /home/luolab/PROJECTS/PAL_ENHANCER
+conda activate dlc
+cd /home/luolab/PROJECTS/DLC_RHESUS
 
 # Step 1 — calibrate cameras (skip cameras without video; do once per session setup)
 python scripts/calibrate_cameras.py --all --frame-sec 30
@@ -242,8 +231,8 @@ python scripts/fuse_trajectories.py
 - [x] **Qt6 window creation bug** (2026-06-09): OpenCV GUI tools failed due to **special characters in window names** (em-dash `—` and pipe `|`). **Solution:** Simplified window names to alphanumeric + underscores only. Both `calibrate_cameras.py` and `manual_labeler.py` now work correctly. See [QT_SUBPROCESS_FIX.md](QT_SUBPROCESS_FIX.md) for full details.
 
 ### Open TODOs
-- [ ] Calibrate remaining cameras (D3, D4, and D1 if video is available)
-- [ ] Manual labeling for all calibrated cameras (~100 frames per camera)
-- [ ] Notebook section for real-world trajectory visualization (cm heatmap, cm/s metrics)
+- [x] Manual labeling for all calibrated cameras (~100 frames per camera)
+- [x] `manual_labeler.py --mode visibility` V - visible, M - no monkey
+- [ ] Train camera specific DLC model for automated monkey head annotation
 - [ ] Lens distortion correction (solvePnP path) validation — after calibration complete
-- [ ] `manual_labeler.py --all` mode (loop all cameras in one session) — nice to have
+
