@@ -361,6 +361,10 @@ def preprocess_video_direct_ffmpeg(
     video_out_dir = output_dir / video_path.stem
     video_out_dir.mkdir(parents=True, exist_ok=True)
     
+    rebuilt_video = video_out_dir / f"{video_path.stem}_visible_h264.mp4"
+    metadata_csv = video_out_dir / "visible_frame_metadata.csv"
+    info_csv = video_out_dir / "video_info.csv"
+    
     intervals = load_visible_intervals_from_csv(
         csv_path=annotation_csv,
         video_file=video_path.name,  # BASE NAME
@@ -368,32 +372,72 @@ def preprocess_video_direct_ffmpeg(
     )
     
     if not intervals:
-        raise RuntimeError(f"No visible intervals found for {video_path.name}")
+        print(f"[INFO] No visible intervals found for {video_path.name}")
+        
+        source_fps, total_frames, width, height = get_video_info_with_opencv(video_path)
+        
+        video_info = pd.DataFrame(
+            [
+                {
+                    "source_fps": source_fps,
+                    "target_fps": target_fps,
+                    "width": width,
+                    "height": height,
+                    "total_frames": total_frames,
+                    "has_visible_frames": 0,
+                    "num_intervals": 0,
+                    "num_frames": 0,
+                }
+            ]
+        )
+        
+        metadata = pd.DataFrame(
+            columns=[
+                "rebuilt_frame",
+                "camera",
+                "source_video",
+                "source_frame",
+                "source_time_sec",
+                "target_time_sec",
+                "visible_interval_start",
+                "visible_interval_end",
+            ]
+        )
+        
+        video_out_dir.mkdir(parents=True, exist_ok=True)
+        
+        metadata.to_csv(metadata_csv, index=False)
+        video_info.to_csv(info_csv, index=False)
+        
+        print("")
+        print(f"[SKIP] No visible frames. Wrote empty metadata for: {video_path.name}")
+        
+        return video_out_dir
     
     source_fps, total_frames, width, height = get_video_info_with_opencv(video_path)
     
-    rebuilt_video = video_out_dir / f"{video_path.stem}_visible_h264.mp4"
-    metadata_csv = video_out_dir / "visible_frame_metadata.csv"
-    info_csv = video_out_dir / "video_info.csv"
+    if intervals:
+        create_visible_video_with_ffmpeg(
+            video_path=video_path,
+            output_video=rebuilt_video,
+            intervals=intervals,
+            target_fps=target_fps,
+            crf=18,
+            preset="fast",
+            threads=0,
+        )
     
-    create_visible_video_with_ffmpeg(
-        video_path=video_path,
-        output_video=rebuilt_video,
-        intervals=intervals,
-        target_fps=target_fps,
-        crf=18,
-        preset="fast",
-        threads=0,
-    )
-    
-    metadata = generate_visible_frame_metadata(
-        video_path=video_path,
-        intervals=intervals,
-        source_fps=source_fps,
-        total_frames=total_frames,
-        target_fps=target_fps,
-        camera=camera,
-    )
+    if intervals:
+        metadata = generate_visible_frame_metadata(
+            video_path=video_path,
+            intervals=intervals,
+            source_fps=source_fps,
+            total_frames=total_frames,
+            target_fps=target_fps,
+            camera=camera,
+        )
+    else:
+        metadata = pd.DataFrame()
     
     video_info = pd.DataFrame(
         [
@@ -403,6 +447,9 @@ def preprocess_video_direct_ffmpeg(
                 "width": width,
                 "height": height,
                 "total_frames": total_frames,
+                "has_visible_frames": 1 if intervals else 0,
+                "num_intervals": len(intervals) if intervals else 0,
+                "num_frames": len(metadata),
             }
         ]
     )
