@@ -15,6 +15,8 @@ vignettes/
 notebook/
 notebooks/
 tmp/
+scripts/*.out
+scripts/shell/
 
 # R project files
 .Rhistory
