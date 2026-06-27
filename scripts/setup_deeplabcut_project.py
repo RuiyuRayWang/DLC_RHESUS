@@ -18,6 +18,7 @@ After running this, you can train with:
     deeplabcut.train_network(config_path)
 """
 
+import argparse
 import pandas as pd
 import cv2
 import numpy as np
@@ -31,18 +32,18 @@ from tqdm import tqdm
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-LABEL_DIR = PROJECT_ROOT / 'results' / 'oft_analysis'
+LABEL_DIR = PROJECT_ROOT / 'results' / 'oft_analysis' / 'downsampled'
 DLC_PROJECT_DIR = PROJECT_ROOT / 'deeplabcut_projects'
 
 # Video directories (search in order of priority)
 VIDEO_DIRS = [
-    Path('/media/luolab/memcore/oft_rhp/H1705011'),  # Local fast storage (primary)
-    Path('/media/luolab/MyBook2/oft_rhp/H1705011'),  # External drive (fallback)
-    PROJECT_ROOT / 'data' / 'oft_rhp',               # Project data (fallback)
+    Path('/media/luolab/MyBook2/oft_rhp/videos_downsampled/H1705011'),  # External drive (fallback)
+    # Path('/media/luolab/memcore/oft_rhp/videos_downsampled/H1705011'),  # Local fast storage (primary)
+    # PROJECT_ROOT / 'data' / 'oft_rhp' / 'videos_downsampled' / 'H1705011',               # Project data (fallback)
 ]
 
 # DeepLabCut project settings
-PROJECT_NAME = 'monkey_oft_tracking_D2'
+PROJECT_NAME = f'monkey_oft_tracking'
 EXPERIMENTER = 'luolab'
 BODYPART = 'head'  # single point: monkey head
 
@@ -52,11 +53,15 @@ TARGET_TOTAL_FRAMES = 7000  # global cap for extracted labeled frames
 MAX_FRAMES_PER_VIDEO = 600  # secondary guardrail per video
 
 
-# ── Find all labeled CSVs ──────────────────────────────────────────────────────
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="")
+    parser.add_argument("camera", type=str, help="Camera identifier",)
+    return parser.parse_args()
 
-def load_label_config():
+
+def load_label_config(camera):
     """Load selected label files from config."""
-    config_path = PROJECT_ROOT / 'deeplabcut_label_config_D2.json'
+    config_path = PROJECT_ROOT / f'deeplabcut_label_config_{camera}.json'
     
     if not config_path.exists():
         print("❌ No label file configuration found!")
@@ -268,12 +273,12 @@ def extract_labeled_frames(df, video_path, output_dir, max_frames=None):
 
 # ── Create DeepLabCut project ──────────────────────────────────────────────────
 
-def create_dlc_project():
+def create_dlc_project(camera):
     """Create DeepLabCut project directory structure."""
     
     # Create project directory
     date_str = datetime.now().strftime('%Y-%m-%d')
-    project_dir = DLC_PROJECT_DIR / f"{PROJECT_NAME}-{EXPERIMENTER}-{date_str}"
+    project_dir = DLC_PROJECT_DIR / f"{PROJECT_NAME}_{camera}_downsampled-{EXPERIMENTER}-{date_str}"
     
     if project_dir.exists():
         print(f"⚠️  Project already exists: {project_dir}")
@@ -439,13 +444,15 @@ def convert_to_dlc_format(extracted_frames, project_dir, output_dir):
 # ── Main workflow ──────────────────────────────────────────────────────────────
 
 def main():
+    args = parse_args()
+    
     print("=" * 70)
     print("DeepLabCut Project Setup from Manual Labels")
     print("=" * 70)
     
     # 1. Load selected CSV files from config
     print("\n1. Loading selected label files from config...")
-    csv_files = load_label_config()
+    csv_files = load_label_config(args.camera)
     
     if csv_files is None:
         return
@@ -460,7 +467,7 @@ def main():
     
     # 2. Create DLC project
     print("\n2. Creating DeepLabCut project...")
-    project_dir = create_dlc_project()
+    project_dir = create_dlc_project(args.camera)
     if not project_dir:
         print("❌ Project creation cancelled")
         return
@@ -477,23 +484,27 @@ def main():
 
         print(f"   - {len(df)} visible monkey frames")
 
-        video_file = df['video_file'].iloc[0]
-        video_path = None
-        for video_dir in VIDEO_DIRS:
-            if not video_dir.exists():
-                continue
+        video_file = csv_path.stem + '.mp4'
+        date = csv_path.parent.stem
+        video_path = VIDEO_DIRS[0] / date / video_file
+        
+        # video_file = df['video_file'].iloc[0]
+        # video_path = None
+        # for video_dir in VIDEO_DIRS:
+        #     if not video_dir.exists():
+        #         continue
 
-            direct_path = video_dir / video_file
-            if direct_path.exists():
-                video_path = direct_path
-                break
+        #     direct_path = video_dir / video_file
+        #     if direct_path.exists():
+        #         video_path = direct_path
+        #         break
 
-            for vp in video_dir.rglob(video_file):
-                video_path = vp
-                break
+        #     for vp in video_dir.rglob(video_file):
+        #         video_path = vp
+        #         break
 
-            if video_path:
-                break
+        #     if video_path:
+        #         break
 
         if not video_path or not video_path.exists():
             print(f"   ⚠️  Video not found: {video_file}")

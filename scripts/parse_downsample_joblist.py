@@ -28,140 +28,28 @@ from pathlib import Path
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Create a dSQ joblist for downsample_ffmpeg.py."
-    )
-
-    parser.add_argument(
-        "video_dir",
-        type=Path,
-        help="Directory containing input videos. Can be a monkey/date folder or a higher-level root.",
-    )
-
-    parser.add_argument(
-        "-j",
-        "--joblist",
-        type=Path,
-        default=None,
-        help="Output dSQ joblist. If omitted, print to stdout.",
-    )
-
-    parser.add_argument(
-        "--script",
-        type=str,
-        default="downsample_ffmpeg.py",
-        help="Path to the single-job downsampling script.",
-    )
-
-    parser.add_argument(
-        "--python",
-        type=str,
-        default="python",
-        help="Python executable or command to use in each job line.",
-    )
-
-    parser.add_argument(
-        "--pattern",
-        type=str,
-        default="*.mp4",
-        help="Video filename glob pattern.",
-    )
-
-    parser.add_argument(
-        "--recursive",
-        action="store_true",
-        help="Recursively search for videos under video_dir.",
-    )
-
-    parser.add_argument(
-        "--raw-video-root",
-        type=Path,
-        default=Path("data/oft_rhp"),
-        help="Raw video root passed to downsample_ffmpeg.py.",
-    )
-
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path("data/oft_rhp/videos_downsampled"),
-        help="Output root for downsampled videos.",
-    )
-
-    parser.add_argument(
-        "--scale",
-        type=float,
-        default=0.5,
-        help="Scale factor passed to downsample_ffmpeg.py.",
-    )
-
-    parser.add_argument(
-        "--threads",
-        type=int,
-        default=32,
-        help="ffmpeg thread count passed to downsample_ffmpeg.py.",
-    )
-
-    parser.add_argument(
-        "--crf",
-        type=int,
-        default=18,
-        help="H.264 CRF quality passed to downsample_ffmpeg.py.",
-    )
-
-    parser.add_argument(
-        "--preset",
-        type=str,
-        default="veryfast",
-        help="x264 preset passed to downsample_ffmpeg.py.",
-    )
-
-    parser.add_argument(
-        "--downsample-csv",
-        action="store_true",
-        help="Add --downsample-csv to each job command.",
-    )
-
-    parser.add_argument(
-        "--analysis-root",
-        type=Path,
-        default=Path("results/oft_analysis"),
-        help="Annotation CSV root passed to downsample_ffmpeg.py.",
-    )
-
-    parser.add_argument(
-        "--csv-output-dir",
-        type=Path,
-        default=Path("results/oft_analysis/downsampled"),
-        help="Downsampled CSV output root passed to downsample_ffmpeg.py.",
-    )
-
-    parser.add_argument(
-        "--require-csv",
-        action="store_true",
-        help="Add --require-csv to each job command.",
-    )
-
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Add --overwrite to each job command.",
-    )
-
-    parser.add_argument(
-        "--keep-audio",
-        action="store_true",
-        help="Add --keep-audio to each job command.",
-    )
-
-    parser.add_argument(
-        "--skip-existing",
-        action="store_true",
-        help=(
-            "Do not emit commands for videos whose expected downsampled output already exists. "
-            "This check uses --raw-video-root and --output-dir."
-        ),
-    )
-
+    parser = argparse.ArgumentParser(description="Create a dSQ joblist for downsample_ffmpeg.py.")
+    parser.add_argument("video_dir", type=Path, help="Directory containing input videos. Can be a monkey/date folder or a higher-level root.",)
+    parser.add_argument("-j", "--joblist", type=Path, default=None, help="Output dSQ joblist. If omitted, print to stdout.",)
+    parser.add_argument("--script", type=str, default="downsample_ffmpeg.py", help="Path to the single-job downsampling script.",)
+    parser.add_argument("--python", type=str, default="python", help="Python executable or command to use in each job line.",)
+    parser.add_argument("--pattern", type=str, default="*.mp4", help="Video filename glob pattern.",)
+    parser.add_argument("--recursive", action="store_true", help="Recursively search for videos under video_dir.",)
+    parser.add_argument("--raw-video-root", type=Path, default=Path("data/oft_rhp"), help="Raw video root passed to downsample_ffmpeg.py.",)
+    parser.add_argument("--output-dir", type=Path, default=Path("data/oft_rhp/videos_downsampled"), help="Output root for downsampled videos.",)
+    parser.add_argument("--scale", type=float, default=0.5, help="Scale factor passed to downsample_ffmpeg.py.",)
+    parser.add_argument("--threads", type=int, default=32, help="ffmpeg thread count passed to downsample_ffmpeg.py.",)
+    parser.add_argument("--crf", type=int, default=18, help="H.264 CRF quality passed to downsample_ffmpeg.py.",)
+    parser.add_argument("--preset", type=str, default="veryfast", help="x264 preset passed to downsample_ffmpeg.py.",)
+    parser.add_argument("--downsample-csv", action="store_true", help="Add --downsample-csv to each job command.",)
+    parser.add_argument("--analysis-root", type=Path, default=Path("results/oft_analysis"), help="Annotation CSV root passed to downsample_ffmpeg.py.",)
+    parser.add_argument("--csv-output-dir", type=Path, default=Path("results/oft_analysis/downsampled"), help="Downsampled CSV output root passed to downsample_ffmpeg.py.",)
+    parser.add_argument("--require-csv", action="store_true", help="Add --require-csv to each job command.",)
+    parser.add_argument("--overwrite", action="store_true", help="Add --overwrite to each job command.",)
+    parser.add_argument("--keep-audio", action="store_true", help="Add --keep-audio to each job command.",)
+    parser.add_argument("--skip-existing", action="store_true",
+        help=("Do not emit commands for videos whose expected downsampled output already exists. "
+              "This check uses --raw-video-root and --output-dir."),)
     return parser.parse_args()
 
 

@@ -21,6 +21,26 @@ DEFAULT_PRESET = "veryfast"
 DEFAULT_THREADS = 32
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Downsample one 4K video for DeepLabCut training/inference.")
+    parser.add_argument("--video-path", type=Path, required=True, help="Path to one input video. Intended for one HPC array task.",)
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR, help="Root output directory for downsampled videos.",)
+    parser.add_argument("--raw-video-root", type=Path, default=DEFAULT_RAW_VIDEO_ROOT, help="Raw video root used to preserve monkey/date layout.",)
+    parser.add_argument("--scale", type=float, default=DEFAULT_SCALE, help="Scale factor. Example: 0.5 converts 3840x2160 to 1920x1080.",)
+    parser.add_argument("--width", type=int, default=None, help="Explicit output width. Must be used with --height.",)
+    parser.add_argument("--height", type=int, default=None, help="Explicit output height. Must be used with --width.",)
+    parser.add_argument("--crf", type=int, default=DEFAULT_CRF, help="H.264 CRF quality. Lower is better quality/larger file.",)
+    parser.add_argument("--preset", type=str, default=DEFAULT_PRESET, help="x264 preset: ultrafast, superfast, veryfast, faster, fast, medium, slow.",)
+    parser.add_argument("--threads", type=int, default=DEFAULT_THREADS, help="ffmpeg thread count. Use the CPU allocation from the scheduler.",)
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing video/CSV outputs.",)
+    parser.add_argument("--keep-audio", action="store_true", help="Keep audio track. Default is to remove audio.",)
+    parser.add_argument("--downsample-csv", action="store_true", help="Also downsample the matching annotation CSV centroid columns.",)
+    parser.add_argument("--analysis-root", type=Path, default=DEFAULT_ANALYSIS_ROOT, help="Root directory containing original annotation CSVs.",)
+    parser.add_argument("--csv-output-dir", type=Path, default=DEFAULT_CSV_OUTPUT_DIR, help="Root output directory for downsampled annotation CSVs.",)
+    parser.add_argument("--require-csv", action="store_true", help="Raise an error if the matching annotation CSV is missing.",)
+    return parser.parse_args()
+
+
 def downsampled_output_path(
     video_path: str | Path,
     raw_video_root: str | Path = DEFAULT_RAW_VIDEO_ROOT,
@@ -279,115 +299,6 @@ def downsample_one_video_job(
         )
 
     return output_video
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Downsample one 4K video for DeepLabCut training/inference."
-    )
-
-    parser.add_argument(
-        "--video-path",
-        type=Path,
-        required=True,
-        help="Path to one input video. Intended for one HPC array task.",
-    )
-
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help="Root output directory for downsampled videos.",
-    )
-
-    parser.add_argument(
-        "--raw-video-root",
-        type=Path,
-        default=DEFAULT_RAW_VIDEO_ROOT,
-        help="Raw video root used to preserve monkey/date layout.",
-    )
-
-    parser.add_argument(
-        "--scale",
-        type=float,
-        default=DEFAULT_SCALE,
-        help="Scale factor. Example: 0.5 converts 3840x2160 to 1920x1080.",
-    )
-
-    parser.add_argument(
-        "--width",
-        type=int,
-        default=None,
-        help="Explicit output width. Must be used with --height.",
-    )
-
-    parser.add_argument(
-        "--height",
-        type=int,
-        default=None,
-        help="Explicit output height. Must be used with --width.",
-    )
-
-    parser.add_argument(
-        "--crf",
-        type=int,
-        default=DEFAULT_CRF,
-        help="H.264 CRF quality. Lower is better quality/larger file.",
-    )
-
-    parser.add_argument(
-        "--preset",
-        type=str,
-        default=DEFAULT_PRESET,
-        help="x264 preset: ultrafast, superfast, veryfast, faster, fast, medium, slow.",
-    )
-
-    parser.add_argument(
-        "--threads",
-        type=int,
-        default=DEFAULT_THREADS,
-        help="ffmpeg thread count. Use the CPU allocation from the scheduler.",
-    )
-
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing video/CSV outputs.",
-    )
-
-    parser.add_argument(
-        "--keep-audio",
-        action="store_true",
-        help="Keep audio track. Default is to remove audio.",
-    )
-
-    parser.add_argument(
-        "--downsample-csv",
-        action="store_true",
-        help="Also downsample the matching annotation CSV centroid columns.",
-    )
-
-    parser.add_argument(
-        "--analysis-root",
-        type=Path,
-        default=DEFAULT_ANALYSIS_ROOT,
-        help="Root directory containing original annotation CSVs.",
-    )
-
-    parser.add_argument(
-        "--csv-output-dir",
-        type=Path,
-        default=DEFAULT_CSV_OUTPUT_DIR,
-        help="Root output directory for downsampled annotation CSVs.",
-    )
-
-    parser.add_argument(
-        "--require-csv",
-        action="store_true",
-        help="Raise an error if the matching annotation CSV is missing.",
-    )
-
-    return parser.parse_args()
 
 
 def main() -> None:
