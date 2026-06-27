@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+"""
+Downsample videos for DeepLabCut training and inference.
+"""
+
 from __future__ import annotations
 
 import argparse
