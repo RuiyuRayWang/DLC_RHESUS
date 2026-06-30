@@ -71,6 +71,11 @@ DEFAULT_SCALE = 0.4
 DEFAULT_CACHE_SIZE = 25
 DEFAULT_AUTOSAVE_EVERY = 25
 MIN_BOX_SIZE = 5
+UI_HEADER_H = 62
+UI_PROGRESS_H = 6
+UI_FOOTER_H = 50
+HANDLE_TOL_PX = 10
+
 
 C_YELLOW = (0, 220, 220)
 C_GREEN = (80, 200, 80)
@@ -326,9 +331,16 @@ class BBoxLabeler:
         self.annotations: Dict[int, FrameAnnotation] = {}
         self.current_idx = 0
 
+        # Mouse interaction state. A draw creates a new box. A drag that starts
+        # near an existing edge/corner resizes the box. A drag inside an
+        # existing box moves the box. This lets the user correct a prematurely
+        # released box without undoing and redrawing from scratch.
         self.dragging = False
+        self.mouse_action: Optional[str] = None  # draw, move, resize
+        self.resize_edges = {"left": False, "right": False, "top": False, "bottom": False}
         self.drag_start: Optional[Tuple[int, int]] = None
         self.drag_current: Optional[Tuple[int, int]] = None
+        self.drag_start_box: Optional[BBox] = None
         self.last_save_count = 0
 
         self.win = "MonkeyBBox"
@@ -380,14 +392,31 @@ class BBoxLabeler:
             self.annotations[fn] = FrameAnnotation()
         return self.annotations[fn]
 
-    def _display_to_original(self, x: int, y: int) -> Tuple[int, int]:
-        ox = int(round(x / self.display_scale))
-        oy = int(round(y / self.display_scale))
+    def _display_size(self) -> Tuple[int, int]:
+        return (
+            int(round(self.video.width * self.display_scale)),
+            int(round(self.video.height * self.display_scale)),
+        )
+
+    def _display_to_original(self, x: int, y: int) -> Optional[Tuple[int, int]]:
+        """Convert canvas coordinates to original video coordinates.
+
+        Header/footer/progress bars are outside the video image. Clicks in
+        those UI regions return None and are ignored. This prevents annotation
+        coordinates from being shifted by the non-image UI area.
+        """
+        dw, dh = self._display_size()
+        ix = int(x)
+        iy = int(y) - UI_HEADER_H
+        if ix < 0 or ix >= dw or iy < 0 or iy >= dh:
+            return None
+        ox = int(round(ix / self.display_scale))
+        oy = int(round(iy / self.display_scale))
         ox = max(0, min(self.video.width - 1, ox))
         oy = max(0, min(self.video.height - 1, oy))
         return ox, oy
 
-    def _box_to_display(self, box: BBox) -> BBox:
+    def _box_to_image_display(self, box: BBox) -> BBox:
         x1, y1, x2, y2 = box
         return (
             int(round(x1 * self.display_scale)),
@@ -396,31 +425,118 @@ class BBoxLabeler:
             int(round(y2 * self.display_scale)),
         )
 
+    def _box_to_canvas_display(self, box: BBox) -> BBox:
+        x1, y1, x2, y2 = self._box_to_image_display(box)
+        return x1, y1 + UI_HEADER_H, x2, y2 + UI_HEADER_H
+
+    def _hit_test_existing_box(self, mx: int, my: int, box: BBox) -> Tuple[Optional[str], Dict[str, bool]]:
+        """Return the mouse operation for a click on/near an existing box."""
+        ix = int(mx)
+        iy = int(my) - UI_HEADER_H
+        x1, y1, x2, y2 = self._box_to_image_display(box)
+        tol = HANDLE_TOL_PX
+        near_left = abs(ix - x1) <= tol and (y1 - tol) <= iy <= (y2 + tol)
+        near_right = abs(ix - x2) <= tol and (y1 - tol) <= iy <= (y2 + tol)
+        near_top = abs(iy - y1) <= tol and (x1 - tol) <= ix <= (x2 + tol)
+        near_bottom = abs(iy - y2) <= tol and (x1 - tol) <= ix <= (x2 + tol)
+        inside = x1 < ix < x2 and y1 < iy < y2
+
+        edges = {
+            "left": near_left,
+            "right": near_right,
+            "top": near_top,
+            "bottom": near_bottom,
+        }
+        if any(edges.values()):
+            return "resize", edges
+        if inside:
+            return "move", edges
+        return None, edges
+
+    def _compute_drag_box(self) -> Optional[BBox]:
+        if self.drag_start is None or self.drag_current is None:
+            return None
+
+        if self.mouse_action == "draw":
+            return clamp_box((*self.drag_start, *self.drag_current), self.video.width, self.video.height)
+
+        if self.drag_start_box is None:
+            return None
+
+        sx, sy = self.drag_start
+        cx, cy = self.drag_current
+        dx = cx - sx
+        dy = cy - sy
+        x1, y1, x2, y2 = self.drag_start_box
+
+        if self.mouse_action == "move":
+            w = x2 - x1
+            h = y2 - y1
+            nx1 = max(0, min(self.video.width - 1 - w, x1 + dx))
+            ny1 = max(0, min(self.video.height - 1 - h, y1 + dy))
+            return int(nx1), int(ny1), int(nx1 + w), int(ny1 + h)
+
+        if self.mouse_action == "resize":
+            edges = self.resize_edges
+            nx1, ny1, nx2, ny2 = x1, y1, x2, y2
+            if edges.get("left"):
+                nx1 = x1 + dx
+            if edges.get("right"):
+                nx2 = x2 + dx
+            if edges.get("top"):
+                ny1 = y1 + dy
+            if edges.get("bottom"):
+                ny2 = y2 + dy
+            return clamp_box((nx1, ny1, nx2, ny2), self.video.width, self.video.height)
+
+        return None
+
     def _mouse_cb(self, event, mx, my, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
+            pos = self._display_to_original(mx, my)
+            if pos is None:
+                return
+            ann = self.annotations.get(self._current_frame_num(), FrameAnnotation())
             self.dragging = True
-            self.drag_start = self._display_to_original(mx, my)
-            self.drag_current = self.drag_start
+            self.drag_start = pos
+            self.drag_current = pos
+            self.drag_start_box = ann.bbox
+            self.mouse_action = "draw"
+            self.resize_edges = {"left": False, "right": False, "top": False, "bottom": False}
+            if ann.bbox is not None:
+                action, edges = self._hit_test_existing_box(mx, my, ann.bbox)
+                if action is not None:
+                    self.mouse_action = action
+                    self.resize_edges = edges
 
         elif event == cv2.EVENT_MOUSEMOVE and self.dragging:
-            self.drag_current = self._display_to_original(mx, my)
+            pos = self._display_to_original(mx, my)
+            if pos is not None:
+                self.drag_current = pos
 
         elif event == cv2.EVENT_LBUTTONUP and self.dragging:
+            pos = self._display_to_original(mx, my)
+            if pos is not None:
+                self.drag_current = pos
+            box = self._compute_drag_box()
+            action = self.mouse_action
             self.dragging = False
-            if self.drag_start is None:
-                return
-            end = self._display_to_original(mx, my)
-            box = clamp_box((*self.drag_start, *end), self.video.width, self.video.height)
+            self.mouse_action = None
             self.drag_start = None
             self.drag_current = None
+            self.drag_start_box = None
+            self.resize_edges = {"left": False, "right": False, "top": False, "bottom": False}
+
             if box is None:
-                print("Ignored tiny box. Draw a larger rectangle.")
+                if action == "draw":
+                    print("Ignored tiny box. Draw a larger rectangle, or adjust the existing box by dragging its edge/corner.")
                 return
+
             ann = self._current_ann()
             ann.visible = True
             ann.bbox = box
             self._note_annotation_change()
-            if self.auto_advance:
+            if self.auto_advance and action == "draw":
                 self._next_frame()
 
     def _note_annotation_change(self) -> None:
@@ -445,48 +561,45 @@ class BBoxLabeler:
     def _render(self) -> np.ndarray:
         fn = self._current_frame_num()
         frame = self.video.read(fn)
-        disp = cv2.resize(
-            frame,
-            (int(self.video.width * self.display_scale), int(self.video.height * self.display_scale)),
-            interpolation=cv2.INTER_AREA,
-        )
-        dh, dw = disp.shape[:2]
+        dw, dh = self._display_size()
+        image = cv2.resize(frame, (dw, dh), interpolation=cv2.INTER_AREA)
 
         ann = self.annotations.get(fn, FrameAnnotation())
 
         if ann.visible is False:
-            cv2.drawMarker(disp, (dw // 2, dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
-            cv2.putText(disp, "NO MONKEY", (dw // 2 - 110, dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, C_RED, 3)
+            cv2.drawMarker(image, (dw // 2, dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
+            cv2.putText(image, "NO MONKEY", (dw // 2 - 110, dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, C_RED, 3)
         elif ann.bbox is not None:
-            x1, y1, x2, y2 = self._box_to_display(ann.bbox)
-            cv2.rectangle(disp, (x1, y1), (x2, y2), C_GREEN, 3)
-            cv2.putText(disp, "monkey", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
+            x1, y1, x2, y2 = self._box_to_image_display(ann.bbox)
+            cv2.rectangle(image, (x1, y1), (x2, y2), C_GREEN, 3)
+            cv2.putText(image, "monkey", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
+            # Small handle markers make it clear that the box can be corrected.
+            for hx, hy in ((x1, y1), (x2, y1), (x1, y2), (x2, y2)):
+                cv2.circle(image, (hx, hy), 5, C_GREEN, -1)
         elif ann.visible is True:
-            cv2.putText(disp, "VISIBLE - DRAW BOX", (30, dh - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
+            cv2.putText(image, "VISIBLE - DRAW BOX", (30, dh - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
 
-        if self.dragging and self.drag_start is not None and self.drag_current is not None:
-            preview = clamp_box((*self.drag_start, *self.drag_current), self.video.width, self.video.height)
+        if self.dragging:
+            preview = self._compute_drag_box()
             if preview is not None:
-                x1, y1, x2, y2 = self._box_to_display(preview)
-                cv2.rectangle(disp, (x1, y1), (x2, y2), C_BLUE, 2)
+                x1, y1, x2, y2 = self._box_to_image_display(preview)
+                cv2.rectangle(image, (x1, y1), (x2, y2), C_BLUE, 2)
+
+        canvas_h = UI_HEADER_H + dh + UI_PROGRESS_H + UI_FOOTER_H
+        canvas = np.zeros((canvas_h, dw, 3), dtype=np.uint8)
+        canvas[:, :] = C_BLACK
+        canvas[UI_HEADER_H:UI_HEADER_H + dh, 0:dw] = image
 
         n_box, n_pending, n_no, n_any = self._annotated_counts()
-        cv2.rectangle(disp, (0, 0), (dw, 55), C_BLACK, -1)
         header = (
             f"sample {self.current_idx + 1}/{len(self.frame_nums)} | "
             f"video frame #{fn} ({fn / self.fps:.1f}s) | "
             f"boxes {n_box} | pending {n_pending} | no-monkey {n_no} | reviewed {n_any}"
         )
-        cv2.putText(disp, header, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.68, C_YELLOW, 2, cv2.LINE_AA)
+        cv2.putText(canvas, header, (10, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.68, C_YELLOW, 2, cv2.LINE_AA)
 
-        cv2.rectangle(disp, (0, dh - 42), (dw, dh), C_BLACK, -1)
-        footer = "Drag=box  Enter/Space=accept+next  A=auto  M=no-monkey  N/P=next/prev  U=undo  S=save  Q=save+quit"
-        if self.auto_advance:
-            footer = "AUTO ON  " + footer
-        cv2.putText(disp, footer, (10, dh - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_GRAY, 1, cv2.LINE_AA)
-
-        y0 = dh - 45
-        cv2.rectangle(disp, (0, y0), (dw, y0 + 4), (60, 60, 60), -1)
+        progress_y = UI_HEADER_H + dh
+        cv2.rectangle(canvas, (0, progress_y), (dw, progress_y + UI_PROGRESS_H - 1), (60, 60, 60), -1)
         for i, frame_num in enumerate(self.frame_nums):
             a = self.annotations.get(frame_num)
             if a is None or a.visible is None:
@@ -498,9 +611,15 @@ class BBoxLabeler:
                 color = C_GREEN
             else:
                 color = C_YELLOW
-            cv2.line(disp, (x, y0), (x, y0 + 4), color, 2)
+            cv2.line(canvas, (x, progress_y), (x, progress_y + UI_PROGRESS_H - 1), color, 2)
 
-        return disp
+        footer_y = progress_y + UI_PROGRESS_H
+        footer = "New box: drag empty area | Fix box: drag edge/corner resize, drag inside move | Enter=next  A=auto  M=no  U=undo  S=save  Q=quit"
+        if self.auto_advance:
+            footer = "AUTO ON | " + footer
+        cv2.putText(canvas, footer, (10, footer_y + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.50, C_GRAY, 1, cv2.LINE_AA)
+
+        return canvas
 
     def _save_images_for_positive_boxes(self):
         if self.save_images is None:
@@ -576,6 +695,10 @@ class BBoxLabeler:
             cv2.imshow(self.win, self._render())
             cv2.waitKey(1)
             cv2.setMouseCallback(self.win, self._mouse_cb)
+        except FrameDecodeError as exc:
+            print(f"\nReached undecodable frame during initialization: {exc}")
+            self.video.release()
+            raise SystemExit(1)
         except cv2.error as exc:
             print("\nERROR: Failed to create OpenCV GUI window.")
             print(f"Details: {exc}")
@@ -583,9 +706,15 @@ class BBoxLabeler:
             self.video.release()
             raise SystemExit(1)
 
-        print("\nWindow opened. Draw a box around the monkey. Press Q or ESC to save and quit.\n")
+        print("\nWindow opened. Draw a box around the monkey. Press Q or ESC to save and quit.")
+        print("You can correct a box after releasing the mouse: drag an edge/corner to resize, or drag inside the box to move it.\n")
         while True:
-            cv2.imshow(self.win, self._render())
+            try:
+                cv2.imshow(self.win, self._render())
+            except FrameDecodeError as exc:
+                print(f"\nReached undecodable frame: {exc}")
+                print("Saving current annotations and exiting cleanly.")
+                break
             key = cv2.waitKey(30) & 0xFF
 
             if key in (ord("q"), 27):
