@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Preprocess monkey-visible video frames for DeepLabCut inference.
+Segment monkey-visible video frames for DeepLabCut inference.
 
 This script:
 
