@@ -28,6 +28,10 @@ deeplabcut_projects/
 # Large data files - exclude but keep folder structure
 # ------------------------------------------------------------------------------
 
+# pickles
+*.pickle
+*.pkl
+
 # All h5ads files (AnnData objects - very large)
 *.h5ads
 
