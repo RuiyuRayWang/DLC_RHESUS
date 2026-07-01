@@ -15,8 +15,8 @@ results/
 │   ├── calibration_D2.json   # Camera D2 calibration
 │   ├── calibration_D3.json   # Camera D3 calibration
 │   ├── calibration_D4.json   # Camera D4 calibration
-│   ├── calibration_frame_D*.png  # Reference frames (excluded: 12-13MB each)
-│   └── README.md
+│   └── calibration_frame_D*.png  # Reference frames (excluded: 12-13MB each)
+│
 ├── oft_analysis/              # OFT trajectory outputs (excluded)
 │   └── [monkey_id]/
 │       └── [date]/

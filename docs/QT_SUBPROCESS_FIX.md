@@ -108,3 +108,5 @@ When debugging Qt6/OpenCV GUI issues:
 ---
 
 **Status:** Issue resolved - both scripts working as of 2026-06-09
+
+**Alternative:** ffmpeg

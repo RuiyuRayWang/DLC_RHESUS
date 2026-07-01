@@ -1,6 +1,7 @@
-# Minimal dependency set for the OFT video pipeline on macOS.
+# Minimal dependency set for the OFT video_tracking environment on macOS.
 # GPU/CUDA/SAM-era packages were intentionally removed.
 # Use conda to install these (see environment.video_tracking.yml)
+# TODO: ffmpeg and opencv should be included
 
 numpy>=1.24
 pandas>=2.0

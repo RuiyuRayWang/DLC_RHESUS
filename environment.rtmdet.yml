@@ -1,0 +1,25 @@
+name: rtmdet
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.10
+  - pytorch::pytorch
+  - pytorch::pytorch-cuda=12.1
+  - pytorch::torchvision
+  - ffmpeg
+  - pip
+  - pip:
+    - mmengine>=0.10.4
+    - mmcv>=2.1.0
+    - mmdet>=3.3.0
+    - mmyolo>=0.6.0
+    - accelerate>=0.24.0
+    - opencv-python>=4.8.0
+    - numpy>=1.24.0
+    - pandas>=1.5.0
+    - scikit-learn>=1.3.0
+    - pillow>=10.0.0
+    - tqdm>=4.65.0

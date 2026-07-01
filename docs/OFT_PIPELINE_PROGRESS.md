@@ -25,9 +25,9 @@
    - Use: `python scripts/manual_labeler.py --camera D2`
    - See [MANUAL_LABELER_REFERENCE.md](MANUAL_LABELER_REFERENCE.md) for full guide
 3. **Fuse trajectories** into real-world coordinates
-4. **Analyze results** in notebook
+4. **Analyze results** using `select_time_window.py` script
 
-### Calibration Results
+### Calibration Results (Needs update)
 | Camera | Status | Points Labeled | Floor Error | solvePnP Error | Notes |
 |--------|--------|----------------|-------------|----------------|-------|
 | D2 | ✅ Complete | 8/8 | **0.00 cm** | 62.66 px | Perfect! |
