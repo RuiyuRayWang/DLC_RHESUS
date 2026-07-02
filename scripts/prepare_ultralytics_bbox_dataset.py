@@ -124,16 +124,50 @@ def collect_annotations(csv_path: Path) -> Tuple[str, Dict[int, List[RowAnno]], 
     return video_name, frame_to_annos, kept
 
 
+def collect_background_frames(
+    csv_path: Path,
+    positive_frames: Set[int],
+    max_background: int,
+    seed: int,
+) -> Tuple[Set[int], int]:
+    """Collect frame indices where monkey_visible is false for background images."""
+    if max_background <= 0:
+        return set(), 0
+
+    df = pd.read_csv(csv_path, usecols=["video_frame", "monkey_visible"])
+    neg_candidates: List[int] = []
+
+    for _, row in df.iterrows():
+        if parse_bool(row.get("monkey_visible")):
+            continue
+        frame_idx = int(row["video_frame"])
+        if frame_idx in positive_frames:
+            continue
+        neg_candidates.append(frame_idx)
+
+    unique_neg = sorted(set(neg_candidates))
+    if not unique_neg:
+        return set(), 0
+
+    rng = random.Random(seed)
+    if len(unique_neg) <= max_background:
+        return set(unique_neg), len(unique_neg)
+
+    sampled = sorted(rng.sample(unique_neg, k=max_background))
+    return set(sampled), len(unique_neg)
+
+
 def extract_video_frames(
     video_path: Path,
     frame_to_annos: Dict[int, List[RowAnno]],
+    background_frames: Set[int],
     split: str,
     out_root: Path,
     image_ext: str,
-) -> Tuple[int, int]:
-    target_frames: Set[int] = set(frame_to_annos.keys())
+) -> Tuple[int, int, int]:
+    target_frames: Set[int] = set(frame_to_annos.keys()) | set(background_frames)
     if not target_frames:
-        return 0, 0
+        return 0, 0, 0
 
     images_dir = out_root / "images" / split
     labels_dir = out_root / "labels" / split
@@ -148,6 +182,7 @@ def extract_video_frames(
     max_target = max(target_frames)
     found_frames = 0
     written_boxes = 0
+    written_backgrounds = 0
     frame_idx = 0
 
     while True:
@@ -162,21 +197,28 @@ def extract_video_frames(
             label_path = labels_dir / f"{base}.txt"
 
             label_lines: List[str] = []
-            for anno in frame_to_annos[frame_idx]:
+            for anno in frame_to_annos.get(frame_idx, []):
                 clamped = clamp_box(anno.x1, anno.y1, anno.x2, anno.y2, w, h)
                 if clamped is None:
                     continue
                 label_lines.append(to_yolo_line(*clamped, w, h))
 
-            if label_lines:
+            write_image = bool(label_lines) or (frame_idx in background_frames)
+            if write_image:
                 if image_ext.lower() == "jpg":
                     cv2.imwrite(str(image_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
                 else:
                     cv2.imwrite(str(image_path), frame)
-                label_path.write_text("\n".join(label_lines) + "\n", encoding="utf-8")
+
+                if label_lines:
+                    label_path.write_text("\n".join(label_lines) + "\n", encoding="utf-8")
+                    written_boxes += len(label_lines)
+                else:
+                    # Empty label file marks a background sample for Ultralytics detection.
+                    label_path.write_text("", encoding="utf-8")
+                    written_backgrounds += 1
 
                 found_frames += 1
-                written_boxes += len(label_lines)
 
             if frame_idx >= max_target and found_frames >= len(target_frames):
                 break
@@ -187,7 +229,7 @@ def extract_video_frames(
         frame_idx += 1
 
     cap.release()
-    return found_frames, written_boxes
+    return found_frames, written_boxes, written_backgrounds
 
 
 def find_pairs(videos_dir: Path, csv_dir: Path) -> List[Tuple[Path, Path]]:
@@ -247,6 +289,17 @@ def parse_args() -> argparse.Namespace:
         default="jpg",
         help="Output image format",
     )
+    parser.add_argument(
+        "--include-background",
+        action="store_true",
+        help="Include monkey_visible=False frames as background samples with empty label files",
+    )
+    parser.add_argument(
+        "--background-ratio",
+        type=float,
+        default=0.5,
+        help="Max background images per video as ratio of positive frames (used with --include-background)",
+    )
     return parser.parse_args()
 
 
@@ -282,6 +335,7 @@ def main() -> None:
     total_rows = 0
     total_images = 0
     total_boxes = 0
+    total_backgrounds = 0
 
     for split, split_pairs in (("train", train_pairs), ("val", val_pairs)):
         for video_path, csv_path in split_pairs:
@@ -293,17 +347,34 @@ def main() -> None:
                 print(f"[WARN] No positive bbox rows in {csv_path.name}")
                 continue
 
-            found, boxes = extract_video_frames(
+            positive_frames = set(frame_to_annos.keys())
+            background_frames: Set[int] = set()
+            n_bg_candidates = 0
+            if args.include_background:
+                max_background = max(0, int(round(len(positive_frames) * args.background_ratio)))
+                background_frames, n_bg_candidates = collect_background_frames(
+                    csv_path=csv_path,
+                    positive_frames=positive_frames,
+                    max_background=max_background,
+                    seed=args.seed,
+                )
+
+            found, boxes, backgrounds = extract_video_frames(
                 video_path=video_path,
                 frame_to_annos=frame_to_annos,
+                background_frames=background_frames,
                 split=split,
                 out_root=out_root,
                 image_ext=args.image_ext,
             )
-            print(f"[INFO] {split:<5} {video_path.name}: rows={kept} images={found} boxes={boxes}")
+            print(
+                f"[INFO] {split:<5} {video_path.name}: rows={kept} images={found} boxes={boxes} "
+                f"backgrounds={backgrounds} bg_candidates={n_bg_candidates}"
+            )
             total_rows += kept
             total_images += found
             total_boxes += boxes
+            total_backgrounds += backgrounds
 
     yaml_path = write_data_yaml(out_root)
     print("\n[INFO] Dataset prepared")
@@ -312,6 +383,7 @@ def main() -> None:
     print(f"[INFO] total annotation rows kept: {total_rows}")
     print(f"[INFO] total images written: {total_images}")
     print(f"[INFO] total boxes written: {total_boxes}")
+    print(f"[INFO] total background images written: {total_backgrounds}")
 
 
 if __name__ == "__main__":

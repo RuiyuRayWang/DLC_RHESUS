@@ -30,6 +30,9 @@ vignettes/
 # Large data files - exclude but keep folder structure
 # ------------------------------------------------------------------------------
 
+# Model snapshots
+*.pt
+
 # All h5ads files (AnnData objects - very large)
 *.h5ads
 

@@ -54,6 +54,8 @@ python scripts/prepare_ultralytics_bbox_dataset.py \
   --videos-dir data/oft_rhp/videos_downsampled/H1705011/2026-06-16 \
   --csv-dir results/bbox/H1705011/2026-06-16 \
   --out-root datasets/ultralytics_bbox/H1705011_2026-06-16 \
+  --include-background \
+  --background-ratio 0.5 \
   --val-ratio 0.25 \
   --seed 42
 ```
@@ -66,6 +68,13 @@ Rows are included only if:
 - bbox coordinates are present and valid
 
 Rows with missing/invalid boxes are skipped.
+
+If `--include-background` is used:
+
+- frames with `monkey_visible == False` can be sampled as background images
+- background images get empty label files (`.txt` with zero lines)
+- `--background-ratio` controls max sampled backgrounds per video as a ratio of
+  positive frames (for example `0.5` means up to 1 background per 2 positives)
 
 ## Quick Sanity Checks
 
@@ -92,4 +101,17 @@ python scripts/train_rtdetr.py \
   --imgsz 960 \
   --batch 16 \
   --device 0
+```
+
+8-GPU example:
+
+```bash
+python scripts/train_rtdetr.py \
+  --data datasets/ultralytics_bbox/H1705011_2026-06-16/data.yaml \
+  --model rtdetr-l.pt \
+  --epochs 100 \
+  --imgsz 960 \
+  --batch 64 \
+  --device 0,1,2,3,4,5,6,7 \
+  --workers 16
 ```

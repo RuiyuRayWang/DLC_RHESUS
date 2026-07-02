@@ -29,7 +29,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--workers", type=int, default=8)
-    parser.add_argument("--device", default="0", help="CUDA device index, 'cpu', or comma list")
+    parser.add_argument(
+        "--device",
+        default="0",
+        help="CUDA device index (0), comma list (0,1,...), or cpu",
+    )
     parser.add_argument("--project", default="results/ultralytics")
     parser.add_argument("--name", default="rtdetr_monkey_bbox")
     parser.add_argument("--patience", type=int, default=30)
@@ -43,6 +47,11 @@ def main() -> None:
     data_yaml = args.data.resolve()
     if not data_yaml.exists():
         raise FileNotFoundError(f"data.yaml not found: {data_yaml}")
+
+    print(
+        f"[INFO] Starting RT-DETR training: data={data_yaml} model={args.model} "
+        f"device={args.device} batch={args.batch} workers={args.workers}"
+    )
 
     model = RTDETR(args.model)
     model.train(

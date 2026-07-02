@@ -104,7 +104,9 @@ Monkey positions in the OFT are traced either manually or detected by artificial
     --videos-dir data/oft_rhp/videos_downsampled/H1705011/2026-06-16 \
     --csv-dir results/bbox/H1705011/2026-06-16 \
     --out-root datasets/ultralytics_bbox/H1705011_2026-06-16 \
-    --val-ratio 0.25 \
+    --include-background \
+    --background-ratio 0.1 \
+    --val-ratio 0.125 \
     --seed 42
   ```
   Notes:
@@ -113,8 +115,24 @@ Monkey positions in the OFT are traced either manually or detected by artificial
   - Output follows Ultralytics detection layout:
     `images/train`, `images/val`, `labels/train`, `labels/val`, `data.yaml`
   - Only rows with `monkey_visible=True` and valid bbox coordinates are used.
+  - With `--include-background`, sampled `monkey_visible=False` frames are exported as
+    background samples (empty `.txt` labels).
 
 - Train [RT-DETR](https://docs.ultralytics.com/models/rtdetr) (preferred):
+  ```bash
+  conda activate det
+python scripts/train_rtdetr.py \
+  --data datasets/ultralytics_bbox/H1705011_2026-06-16/data.yaml \
+  --model rtdetr-l.pt \
+  --epochs 100 \
+  --imgsz 960 \
+  --batch 8 \
+  --device 0 \
+  --project results/ultralytics \
+  --name rtdetr_monkey_bbox_H1705011_2026-06-16
+  ```
+
+- Train on 8 GPUs (DDP):
   ```bash
   conda activate det
   python scripts/train_rtdetr.py \
@@ -122,11 +140,15 @@ Monkey positions in the OFT are traced either manually or detected by artificial
     --model rtdetr-l.pt \
     --epochs 100 \
     --imgsz 960 \
-    --batch 16 \
-    --device 0 \
+    --batch 64 \
+    --device 0,1,2,3,4,5,6,7 \
+    --workers 16 \
     --project results/ultralytics \
-    --name rtdetr_monkey_bbox_H1705011_2026-06-16
+    --name rtdetr_monkey_bbox_H1705011_2026-06-16_8gpu
   ```
+  Notes:
+  - Keep `batch` as global batch size; tune it to avoid OOM.
+  - If OOM occurs, lower `--batch` (for example, 48 or 32).
 
 - Inference with the trained model and integrate bbox detections into OFT tracking.
 
