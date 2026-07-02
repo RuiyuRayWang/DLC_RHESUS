@@ -73,7 +73,7 @@ Once segmentation works well:
 ## File Structure
 
 ```
-DLC_RHESUS/
+PAL_ENHANCER/
 ├── data/
 │   └── oft_rhp/
 │       └── 134569R/          # 172 video files

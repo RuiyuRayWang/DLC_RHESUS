@@ -10,26 +10,16 @@
 
 ```
 data/
-├── oft_rhp/                   # OFT videos for rhesus macaques
+├── oft_rhp/                    # OFT videos for rhesus macaques
 │   ├── H1705011/              # Monkey ID
 │   │   └── 2026-05-25/        # Session date
 │   │       ├── D01_*.mp4      # Camera D1 video (top-left quadrant)
 │   │       ├── D02_*.mp4      # Camera D2 video (top-right quadrant)
 │   │       ├── D03_*.mp4      # Camera D3 video (bottom-left quadrant)
 │   │       └── D04_*.mp4      # Camera D4 video (bottom-right quadrant)
-│   └── H1803085/               # Another monkey (if applicable)
-|
-├── videos_downsampled         # Downsampled videos (scripts/downsample_ffmpeg.py)
-|   ├── H1705011/              # Monkey ID
-│   │   └── 2026-05-25/        # Session date
-│   │       ├── D01_*_downsampled.mp4      # Downsampled camera D1 video (top-left quadrant)
-│   │       ├── D02_*_downsampled.mp4      # Downsampled camera D2 video (top-right quadrant)
-│   │       ├── D03_*_downsampled.mp4      # Downsampled camera D3 video (bottom-left quadrant)
-│   │       └── D04_*_downsampled.mp4      # Downsampled camera D4 video (bottom-right quadrant)
-│   └── H1803085/               # Another monkey (if applicable)
-|
-└-- [other datasets]
-``` 
+│   └── 134569R/               # Another monkey (if applicable)
+└── [other datasets]
+```
 
 ---
 
@@ -57,8 +47,19 @@ data/
 
 ### 2026-06-09
 - **Session:** H1705011 / 2026-05-25
-- **Videos available:** D01, D02, D03, D04
-- **Status:** All four cameras calibrated
+- **Videos available:** D02, D03, D04 (D01 not found)
+- **Status:** All three cameras calibrated
+- **Total frames:** 
+  - D02: 28,162 frames (~23.5 minutes)
+  - D03: [frame count]
+  - D04: [frame count]
+
+### Future Sessions
+Add new session information here:
+- Date:
+- Monkey ID:
+- Videos collected:
+- Special notes:
 
 ---
 
@@ -77,6 +78,25 @@ rsync -avz --progress user@server:/path/to/oft_videos/ data/oft_rhp/
 # Or copy from external drive
 cp -r /Volumes/ExternalDrive/OFT_DATA/* data/oft_rhp/
 ```
+
+---
+
+## Processing Status
+
+### H1705011 / 2026-05-25
+
+| Camera | Video File | Calibrated | Labeled | Fused |
+|--------|------------|------------|---------|-------|
+| D1 | ❌ Not found | ⏸ | ⏸ | ⏸ |
+| D2 | D02_20260525161934.mp4 | ✅ | 🔄 | ⏸ |
+| D3 | D03_20260525170340.mp4 | ✅ | 🔄 | ⏸ |
+| D4 | [filename] | ✅ | 🔄 | ⏸ |
+
+**Legend:**
+- ✅ Complete
+- 🔄 In progress
+- ⏸ Not started
+- ❌ Issue/missing
 
 ---
 
@@ -113,4 +133,4 @@ du -sh data/
 
 ---
 
-**Last updated:** 2026-07-01
+**Last updated:** 2026-06-09
