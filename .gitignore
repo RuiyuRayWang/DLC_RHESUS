@@ -7,16 +7,17 @@
 
 # Non-OFT content - exclude entire directories
 # ------------------------------------------------------------------------------
-manuscript/
+analysis/
+datasets/
 design/
 figures/
-analysis/
-vignettes/
+manuscript/
 notebook/
 notebooks/
-tmp/
-scripts/*.out
 scripts/shell/
+scripts/*.out
+tmp/
+vignettes/
 
 # R project files
 .Rhistory
