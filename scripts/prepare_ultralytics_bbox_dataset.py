@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Build an Ultralytics detection dataset from bbox CSV annotations + videos.
+Build an Ultralytics detection dataset or inference frame cache from videos.
 
 This script is designed for the OFT monkey workflow where annotations are stored in
 CSV files (from scripts/bbox_labeler.py) and source videos are HEVC MP4 files.
@@ -10,7 +10,7 @@ Expected annotation filename mapping:
     video: D01_20260616135117_downsampled.mp4
     csv:   bbox_D01_20260616135117_downsampled.csv
 
-Output dataset structure:
+Training output dataset structure:
     <out_root>/
       images/
         train/*.jpg
@@ -19,6 +19,9 @@ Output dataset structure:
         train/*.txt
         val/*.txt
       data.yaml
+
+Inference output frame structure:
+        <out_root>/<relative_video_parent>/<video_stem>_f000123.jpg
 """
 
 from __future__ import annotations
@@ -272,14 +275,30 @@ def write_data_yaml(out_root: Path) -> Path:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Prepare Ultralytics dataset from bbox CSV + videos")
-    parser.add_argument("--videos-dir", type=Path, required=True, help="Directory containing downsampled MP4 videos")
-    parser.add_argument("--csv-dir", type=Path, required=True, help="Directory containing bbox_*.csv files")
+    parser = argparse.ArgumentParser(description="Prepare Ultralytics training dataset or inference frame cache")
+    parser.add_argument(
+        "--mode",
+        choices=["train", "inference"],
+        default="train",
+        help="train: build YOLO-format dataset from bbox CSVs, inference: sample frames for RT-DETR inference",
+    )
+    parser.add_argument(
+        "--videos-dir",
+        type=Path,
+        required=True,
+        help="Root directory containing input MP4 videos",
+    )
+    parser.add_argument(
+        "--csv-dir",
+        type=Path,
+        default=None,
+        help="Directory containing bbox_*.csv files (required for --mode train)",
+    )
     parser.add_argument(
         "--out-root",
         type=Path,
         default=Path("datasets/ultralytics_bbox"),
-        help="Output root for Ultralytics dataset",
+        help="Output root (dataset root for train mode, extracted-frames root for inference mode)",
     )
     parser.add_argument("--val-ratio", type=float, default=0.2, help="Fraction of videos assigned to validation")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for split")
@@ -300,11 +319,157 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="Max background images per video as ratio of positive frames (used with --include-background)",
     )
+    parser.add_argument(
+        "--sample-fps",
+        type=float,
+        default=2.0,
+        help="Sampling FPS for inference mode",
+    )
+    parser.add_argument(
+        "--input-fps-fallback",
+        type=float,
+        default=20.0,
+        help="Fallback FPS when video metadata is missing or invalid (inference mode)",
+    )
+    parser.add_argument(
+        "--recursive",
+        action="store_true",
+        help="Recursively discover MP4 files under --videos-dir (inference mode)",
+    )
+    parser.add_argument(
+        "--video-path",
+        type=Path,
+        default=None,
+        help="Optional single video path to process in inference mode",
+    )
+    parser.add_argument(
+        "--videos-root",
+        type=Path,
+        default=None,
+        help="Video root for relative layout when using --video-path in inference mode",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing extracted frames in inference mode",
+    )
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def safe_fps(cap: cv2.VideoCapture, fallback: float) -> float:
+    fps = float(cap.get(cv2.CAP_PROP_FPS))
+    if not pd.notna(fps) or fps <= 0:
+        return float(fallback)
+    return float(fps)
+
+
+def extract_inference_frames_for_video(
+    video_path: Path,
+    rel_video: Path,
+    out_root: Path,
+    sample_fps: float,
+    input_fps_fallback: float,
+    image_ext: str,
+    overwrite: bool,
+) -> Tuple[int, Path]:
+    out_dir = out_root / rel_video.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    stem = video_path.stem
+    ext = image_ext.lower()
+    existing = sorted(out_dir.glob(f"{stem}_f*.{ext}"))
+    if existing and not overwrite:
+        return 0, out_dir
+
+    if overwrite and existing:
+        for p in existing:
+            p.unlink()
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+
+    fps = safe_fps(cap, fallback=input_fps_fallback)
+    sample_period = 1.0 / sample_fps
+    next_sample_time = 0.0
+    frame_idx = 0
+    written = 0
+
+    while True:
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            break
+
+        frame_time = frame_idx / fps
+        if frame_time + 1e-9 >= next_sample_time:
+            frame_name = f"{stem}_f{frame_idx:06d}.{ext}"
+            out_path = out_dir / frame_name
+            if ext == "jpg":
+                cv2.imwrite(str(out_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            else:
+                cv2.imwrite(str(out_path), frame)
+            written += 1
+            next_sample_time += sample_period
+
+        frame_idx += 1
+
+    cap.release()
+    return written, out_dir
+
+
+def run_inference_mode(args: argparse.Namespace) -> None:
+    if args.sample_fps <= 0:
+        raise ValueError("--sample-fps must be > 0")
+
+    videos_dir = args.videos_dir.resolve()
+    out_root = args.out_root.resolve()
+
+    if args.video_path is not None:
+        video_path = args.video_path.resolve()
+        if not video_path.exists():
+            raise FileNotFoundError(f"video-path not found: {video_path}")
+        base_root = args.videos_root.resolve() if args.videos_root is not None else videos_dir
+        try:
+            rel_video = video_path.relative_to(base_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"video-path is not under videos-root. video-path={video_path} videos-root={base_root}"
+            ) from exc
+        video_paths = [video_path]
+        rel_paths = [rel_video]
+    else:
+        if not videos_dir.exists():
+            raise FileNotFoundError(f"videos-dir not found: {videos_dir}")
+        if args.recursive:
+            video_paths = sorted(videos_dir.rglob("*.mp4"))
+        else:
+            video_paths = sorted(videos_dir.glob("*.mp4"))
+        if not video_paths:
+            raise RuntimeError("No videos found for inference extraction")
+        rel_paths = [p.relative_to(videos_dir) for p in video_paths]
+
+    total_written = 0
+    print(f"[INFO] Inference extraction mode: videos={len(video_paths)} sample_fps={args.sample_fps}")
+    for video_path, rel_video in zip(video_paths, rel_paths):
+        written, out_dir = extract_inference_frames_for_video(
+            video_path=video_path,
+            rel_video=rel_video,
+            out_root=out_root,
+            sample_fps=args.sample_fps,
+            input_fps_fallback=args.input_fps_fallback,
+            image_ext=args.image_ext,
+            overwrite=args.overwrite,
+        )
+        total_written += written
+        print(f"[INFO] {rel_video} -> {out_dir} (written={written})")
+
+    print(f"[DONE] Inference frame extraction complete. Total frames written: {total_written}")
+
+
+def run_train_mode(args: argparse.Namespace) -> None:
+    if args.csv_dir is None:
+        raise ValueError("--csv-dir is required when --mode train")
+
 
     videos_dir = args.videos_dir.resolve()
     csv_dir = args.csv_dir.resolve()
@@ -384,6 +549,14 @@ def main() -> None:
     print(f"[INFO] total images written: {total_images}")
     print(f"[INFO] total boxes written: {total_boxes}")
     print(f"[INFO] total background images written: {total_backgrounds}")
+
+
+def main() -> None:
+    args = parse_args()
+    if args.mode == "inference":
+        run_inference_mode(args)
+        return
+    run_train_mode(args)
 
 
 if __name__ == "__main__":

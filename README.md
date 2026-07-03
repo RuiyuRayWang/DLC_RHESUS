@@ -92,10 +92,10 @@ Monkey positions in the OFT are traced either manually or detected by artificial
 - Downsample videos
     - rsync videos to remote HPC server
     - use dSQ for batch downsampling (parse_ffmpeg_joblist.py & downsample_ffmpeg.py)
-    - NOTE: if manual labels were generated on raw video, 
+    - NOTE: if manual labels were generated on raw video (e.g. 3840x2160), 
             the csv's need to be updated with the same downsampling ratio (downsample_ffmpeg.py)
     - rsync remote downsampled videos to local
-- Manually label bbox (bbox_labeler.py, launch in `video_tracking` conda env)
+- Manually label bbox (bbox_labeler.py, launch in conda env `video_tracking`)
 - Prepare Ultralytics dataset from bbox CSV + downsampled videos (see `docs/DATA_PREPARATION.md`)
   using sequential frame decoding (important for HEVC random-access instability):
   ```bash
@@ -118,29 +118,29 @@ Monkey positions in the OFT are traced either manually or detected by artificial
   - With `--include-background`, sampled `monkey_visible=False` frames are exported as
     background samples (empty `.txt` labels).
 
-- Train [RT-DETR](https://docs.ultralytics.com/models/rtdetr) (preferred):
+- Train [RT-DETR](https://docs.ultralytics.com/models/rtdetr):
   ```bash
   conda activate det
-python scripts/train_rtdetr.py \
-  --data datasets/ultralytics_bbox/H1705011_2026-06-16/data.yaml \
-  --model rtdetr-l.pt \
-  --epochs 100 \
-  --imgsz 960 \
-  --batch 8 \
-  --device 0 \
-  --project results/ultralytics \
-  --name rtdetr_monkey_bbox_H1705011_2026-06-16
+  python scripts/train_rtdetr.py \
+    --data data/datasets/ultralytics_bbox/H1705011_2026-06-16/data.yaml \
+    --model rtdetr-l.pt \
+    --epochs 100 \
+    --imgsz 960 \
+    --batch 8 \
+    --device 0 \
+    --project results/ultralytics \
+    --name rtdetr_monkey_bbox_H1705011_2026-06-16
   ```
 
 - Train on 8 GPUs (DDP):
   ```bash
   conda activate det
   python scripts/train_rtdetr.py \
-    --data datasets/ultralytics_bbox/H1705011_2026-06-16/data.yaml \
+    --data data/datasets/ultralytics_bbox/H1705011_2026-06-16/data.yaml \
     --model rtdetr-l.pt \
     --epochs 100 \
     --imgsz 960 \
-    --batch 64 \
+    --batch 32 \
     --device 0,1,2,3,4,5,6,7 \
     --workers 16 \
     --project results/ultralytics \
@@ -148,14 +148,58 @@ python scripts/train_rtdetr.py \
   ```
   Notes:
   - Keep `batch` as global batch size; tune it to avoid OOM.
-  - If OOM occurs, lower `--batch` (for example, 48 or 32).
+  - If OOM occurs, lower `--batch` (for example, 16 or 8).
 
-- Inference with the trained model and integrate bbox detections into OFT tracking.
+- 2026-07-02:
+  Trained for 100 epochs. mAP50-95 achieved ~0.6929.
+  Weights saved at `runs/detect/results/ultralytics/rtdetr_monkey_bbox_H1705011_2026-06-16_8gpu-3/weights/best.pt`.
+  
+- Inference with the trained model and integrate bbox detections into OFT tracking.  # **1st priority (done)**
+  - Use a 2-step pipeline for large-scale runs:
+    1) extract sampled frames on preprocessing/HPC nodes,
+    2) transfer extracted frames to GPU server and run RT-DETR inference.
+
+  - Step 1: Extract frames at target sampling rate (no bbox inference yet)
+    - Script: `scripts/prepare_ultralytics_bbox_dataset.py` in `--mode inference`
+    - Input videos: `data/oft_rhp/videos_downsampled` (1920x1080, FPS=20)
+    - Output frames keep source structure under `out-root`, for example:
+      `data/oft_rhp/videos_downsampled/H1705011/2026-06-16/D01_*.mp4`
+      -> `tmp/rtdetr_frames_2hz/H1705011/2026-06-16/D01_*_f000001.jpg`
+    - Frames should be kept for downstream overlay and stitching QC.
+
+  - Example (single monkey/date):
+  ```bash
+  conda activate det
+  python scripts/prepare_ultralytics_bbox_dataset.py \
+    --mode inference \
+    --videos-dir data/oft_rhp/videos_downsampled/H1705011/2026-06-16 \
+    --out-root tmp/rtdetr_frames_2hz \
+    --sample-fps 2 \
+    --recursive
+  ```
+
+  - dSQ joblist generation for Step 1 (one job per video):
+  ```bash
+  python scripts/parse_ffmpeg_joblist.py extract-frames \
+    data/oft_rhp/videos_downsampled/H1705011 \
+    -j scripts/shell/joblist_extract_frames_H1705011.txt \
+    --recursive \
+    --script scripts/prepare_ultralytics_bbox_dataset.py \
+    --videos-root data/oft_rhp/videos_downsampled \
+    --frames-out-root tmp/rtdetr_frames_2hz \
+    --sample-fps 2
+  ```
+
+  - Step 2: RT-DETR inference on pre-extracted frames
+    - Script: `scripts/infer_rtdetr_batch.py`
+    - Output CSVs: `results/predictions/{monkey_id}/{date}/{video_name}_preds.csv`
+    - CSV includes `bbox_x1`, `bbox_y1`, `bbox_x2`, `bbox_y2`, `bbox_cx`, `bbox_cy`, confidence.
+  - For GPU OOM, reduce `--batch` (for example: 64 -> 32 -> 16).
+  
 
 ### sapiens 2 (pose-estimation)
 
 - After detection, do pose-estimation for barrier task # TODO
-
 
 ## Project Structure
 
@@ -186,6 +230,7 @@ DLC_RHESUS/
 │   ├── bbox_labeler.py             # Bounding box labeler
 │   ├── prepare_ultralytics_bbox_dataset.py  # Build YOLO-format dataset from bbox CSV + videos
 │   ├── train_rtdetr.py             # RT-DETR training entrypoint
+│   ├── infer_rtdetr_batch.py       # Batch RT-DETR inference from extracted frames/videos
 │   ├── setup_deeplabcut_project.py # Setup DLC project
 │   ├── downsample_ffmpeg.py        # Downsample 4K raw video to arbitrary resolution
 │   ├── segment_ffmpeg.py           # Segment video based on visibility (previously preprocess_ffmpeg.py)

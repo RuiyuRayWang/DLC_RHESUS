@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Create dSQ joblists for ffmpeg-based OFT video workflows.
+Create dSQ joblists for OFT video preprocessing workflows.
 
 This script supports two subcommands:
 
@@ -9,6 +9,10 @@ This script supports two subcommands:
 
 2. segment
    Emit one command per video/visibility-annotation pair for segment_ffmpeg.py.
+
+3. extract-frames
+    Emit one command per video for prepare_ultralytics_bbox_dataset.py in
+    inference-frame extraction mode.
 
 The deprecated subcommand name "preprocess" is retained as an alias for "segment"
 to avoid breaking older commands.
@@ -56,6 +60,17 @@ python scripts/parse_ffmpeg_joblist.py segment \
   --output-dir data/oft_rhp/visible_dlc_preprocessed_downsampled \
   --target-fps 4 \
   --threads 32
+
+Extract sampled frames for RT-DETR inference:
+
+python scripts/parse_ffmpeg_joblist.py extract-frames \
+    data/oft_rhp/videos_downsampled/H1705011 \
+    -j scripts/shell/joblist_extract_frames_H1705011.txt \
+    --recursive \
+    --script scripts/prepare_ultralytics_bbox_dataset.py \
+    --videos-root data/oft_rhp/videos_downsampled \
+    --frames-out-root tmp/rtdetr_frames_2hz \
+    --sample-fps 2
 """
 
 from __future__ import annotations
@@ -292,6 +307,47 @@ def parse_args() -> argparse.Namespace:
         subparsers,
         name="preprocess",
         help_text="Deprecated alias for segment.",
+    )
+
+    extract_frames = subparsers.add_parser(
+        "extract-frames",
+        help="Create joblist for inference-frame extraction with prepare_ultralytics_bbox_dataset.py.",
+    )
+    add_common_joblist_args(extract_frames)
+    extract_frames.add_argument(
+        "--videos-root",
+        type=Path,
+        default=Path("data/oft_rhp/videos_downsampled"),
+        help="Video root used to preserve relative monkey/date layout.",
+    )
+    extract_frames.add_argument(
+        "--frames-out-root",
+        type=Path,
+        default=Path("tmp/rtdetr_frames_2hz"),
+        help="Output root for extracted inference frames.",
+    )
+    extract_frames.add_argument(
+        "--sample-fps",
+        type=float,
+        default=2.0,
+        help="Sampling FPS passed to prepare_ultralytics_bbox_dataset.py in inference mode.",
+    )
+    extract_frames.add_argument(
+        "--input-fps-fallback",
+        type=float,
+        default=20.0,
+        help="Fallback FPS passed to prepare_ultralytics_bbox_dataset.py.",
+    )
+    extract_frames.add_argument(
+        "--image-ext",
+        choices=["jpg", "png"],
+        default="jpg",
+        help="Image extension for extracted frames.",
+    )
+    extract_frames.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing extracted frames for each video.",
     )
 
     return parser.parse_args()
@@ -589,6 +645,90 @@ def run_segment(args: argparse.Namespace) -> int:
     return len(commands)
 
 
+def expected_extract_output_dir(
+    video_path: Path,
+    videos_root: Path,
+    frames_out_root: Path,
+) -> Path:
+    video_path_resolved = video_path.resolve()
+    videos_root_resolved = videos_root.resolve()
+
+    try:
+        rel_path = video_path_resolved.relative_to(videos_root_resolved)
+    except ValueError as exc:
+        raise ValueError(
+            f"Video path is not under videos_root.\n"
+            f"video_path: {video_path_resolved}\n"
+            f"videos_root: {videos_root_resolved}"
+        ) from exc
+
+    return frames_out_root / rel_path.parent
+
+
+def build_extract_frames_command(
+    video_path: Path,
+    args: argparse.Namespace,
+) -> str:
+    cmd = [
+        args.python,
+        args.script,
+        "--mode",
+        "inference",
+        "--videos-dir",
+        str(args.videos_root),
+        "--video-path",
+        str(video_path),
+        "--videos-root",
+        str(args.videos_root),
+        "--out-root",
+        str(args.frames_out_root),
+        "--sample-fps",
+        str(args.sample_fps),
+        "--input-fps-fallback",
+        str(args.input_fps_fallback),
+        "--image-ext",
+        args.image_ext,
+    ]
+    if args.overwrite:
+        cmd.append("--overwrite")
+    return quote_command(cmd)
+
+
+def run_extract_frames(args: argparse.Namespace) -> int:
+    video_paths = collect_video_paths(
+        video_dir=args.video_dir,
+        pattern=args.pattern,
+        recursive=args.recursive,
+    )
+
+    commands: list[str] = []
+    n_existing = 0
+    img_ext = args.image_ext.lower()
+
+    for video_path in video_paths:
+        if args.skip_existing and not args.overwrite:
+            output_dir = expected_extract_output_dir(
+                video_path=video_path,
+                videos_root=args.videos_root,
+                frames_out_root=args.frames_out_root,
+            )
+            existing = list(output_dir.glob(f"{video_path.stem}_f*.{img_ext}"))
+            if existing:
+                n_existing += 1
+                continue
+
+        commands.append(build_extract_frames_command(video_path, args))
+
+    write_commands(commands, args.joblist)
+
+    if args.joblist is not None:
+        print(f"Wrote {len(commands)} extract-frames jobs to {args.joblist}", file=sys.stderr)
+        if n_existing:
+            print(f"Skipped {n_existing} videos with existing extracted frames.", file=sys.stderr)
+
+    return len(commands)
+
+
 def main() -> None:
     args = parse_args()
 
@@ -596,6 +736,8 @@ def main() -> None:
         run_downsample(args)
     elif args.mode in {"segment", "preprocess"}:
         run_segment(args)
+    elif args.mode == "extract-frames":
+        run_extract_frames(args)
     else:
         raise ValueError(f"Unsupported mode: {args.mode}")
 
