@@ -662,7 +662,7 @@ def expected_extract_output_dir(
             f"videos_root: {videos_root_resolved}"
         ) from exc
 
-    return frames_out_root / rel_path.parent
+    return frames_out_root / rel_path.parent / rel_path.stem
 
 
 def build_extract_frames_command(

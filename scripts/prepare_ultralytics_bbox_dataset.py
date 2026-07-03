@@ -21,7 +21,7 @@ Training output dataset structure:
       data.yaml
 
 Inference output frame structure:
-        <out_root>/<relative_video_parent>/<video_stem>_f000123.jpg
+    <out_root>/<relative_video_parent>/<video_stem>/<video_stem>_f000123.jpg
 """
 
 from __future__ import annotations
@@ -372,7 +372,7 @@ def extract_inference_frames_for_video(
     image_ext: str,
     overwrite: bool,
 ) -> Tuple[int, Path]:
-    out_dir = out_root / rel_video.parent
+    out_dir = out_root / rel_video.parent / video_path.stem
     out_dir.mkdir(parents=True, exist_ok=True)
 
     stem = video_path.stem
