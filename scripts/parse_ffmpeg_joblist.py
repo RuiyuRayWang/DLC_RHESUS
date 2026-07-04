@@ -749,6 +749,13 @@ def run_extract_frames(args: argparse.Namespace) -> int:
 
     for video_path in video_paths:
         if args.skip_existing and not args.overwrite:
+            output_dir = expected_extract_output_dir(
+                video_path=video_path,
+                videos_root=args.videos_root,
+                frames_out_root=args.frames_out_root,
+            )
+            existing_frames = list(output_dir.glob(f"{video_path.stem}_f*.{img_ext}"))
+
             if args.tar_per_video:
                 tar_path = expected_extract_tar_path(
                     video_path=video_path,
@@ -756,17 +763,12 @@ def run_extract_frames(args: argparse.Namespace) -> int:
                     frames_out_root=args.frames_out_root,
                     tar_mode=args.tar_mode,
                 )
-                if tar_path.exists():
+                # In tar mode, treat either existing archive OR existing frame folder as complete.
+                if tar_path.exists() or existing_frames:
                     n_existing += 1
                     continue
             else:
-                output_dir = expected_extract_output_dir(
-                    video_path=video_path,
-                    videos_root=args.videos_root,
-                    frames_out_root=args.frames_out_root,
-                )
-                existing = list(output_dir.glob(f"{video_path.stem}_f*.{img_ext}"))
-                if existing:
+                if existing_frames:
                     n_existing += 1
                     continue
 
