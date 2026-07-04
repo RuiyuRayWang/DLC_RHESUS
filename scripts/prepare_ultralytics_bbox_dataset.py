@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Sequence, Set, Tuple
@@ -353,6 +354,27 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Overwrite existing extracted frames in inference mode",
     )
+    parser.add_argument(
+        "--tar-per-video",
+        action="store_true",
+        help="Create one tar archive per video folder after inference frame extraction",
+    )
+    parser.add_argument(
+        "--tar-mode",
+        choices=["tar", "tar.gz"],
+        default="tar",
+        help="Archive format for --tar-per-video",
+    )
+    parser.add_argument(
+        "--tar-overwrite",
+        action="store_true",
+        help="Overwrite existing tar archive when --tar-per-video is enabled",
+    )
+    parser.add_argument(
+        "--tar-remove-frames",
+        action="store_true",
+        help="Remove extracted frame JPG/PNG files after tar creation",
+    )
     return parser.parse_args()
 
 
@@ -417,6 +439,48 @@ def extract_inference_frames_for_video(
     return written, out_dir
 
 
+def tar_path_for_video(out_dir: Path, video_stem: str, tar_mode: str) -> Path:
+    suffix = ".tar.gz" if tar_mode == "tar.gz" else ".tar"
+    return out_dir.parent / f"{video_stem}{suffix}"
+
+
+def package_frame_dir_to_tar(
+    frame_dir: Path,
+    tar_path: Path,
+    image_ext: str,
+    overwrite: bool,
+    remove_frames: bool,
+) -> Tuple[int, bool]:
+    ext = image_ext.lower()
+    frame_paths = sorted(frame_dir.glob(f"{frame_dir.name}_f*.{ext}"))
+    if not frame_paths:
+        return 0, False
+
+    if tar_path.exists():
+        if overwrite:
+            tar_path.unlink()
+        else:
+            return len(frame_paths), False
+
+    tar_path.parent.mkdir(parents=True, exist_ok=True)
+    mode = "w:gz" if tar_path.suffixes[-2:] == [".tar", ".gz"] else "w"
+
+    with tarfile.open(tar_path, mode=mode) as tf:
+        for frame_path in frame_paths:
+            # Keep a stable internal folder layout per video in the tar.
+            tf.add(frame_path, arcname=f"{frame_dir.name}/{frame_path.name}")
+
+    if remove_frames:
+        for frame_path in frame_paths:
+            frame_path.unlink()
+        try:
+            frame_dir.rmdir()
+        except OSError:
+            pass
+
+    return len(frame_paths), True
+
+
 def run_inference_mode(args: argparse.Namespace) -> None:
     if args.sample_fps <= 0:
         raise ValueError("--sample-fps must be > 0")
@@ -449,6 +513,8 @@ def run_inference_mode(args: argparse.Namespace) -> None:
         rel_paths = [p.relative_to(videos_dir) for p in video_paths]
 
     total_written = 0
+    total_archived = 0
+    total_tar_created = 0
     print(f"[INFO] Inference extraction mode: videos={len(video_paths)} sample_fps={args.sample_fps}")
     for video_path, rel_video in zip(video_paths, rel_paths):
         written, out_dir = extract_inference_frames_for_video(
@@ -461,9 +527,31 @@ def run_inference_mode(args: argparse.Namespace) -> None:
             overwrite=args.overwrite,
         )
         total_written += written
-        print(f"[INFO] {rel_video} -> {out_dir} (written={written})")
+        if args.tar_per_video:
+            tar_path = tar_path_for_video(out_dir=out_dir, video_stem=video_path.stem, tar_mode=args.tar_mode)
+            archived_count, created = package_frame_dir_to_tar(
+                frame_dir=out_dir,
+                tar_path=tar_path,
+                image_ext=args.image_ext,
+                overwrite=args.tar_overwrite or args.overwrite,
+                remove_frames=args.tar_remove_frames,
+            )
+            total_archived += archived_count
+            if created:
+                total_tar_created += 1
+            print(
+                f"[INFO] {rel_video} -> {out_dir} (written={written}) "
+                f"tar={tar_path} created={created} archived_frames={archived_count}"
+            )
+        else:
+            print(f"[INFO] {rel_video} -> {out_dir} (written={written})")
 
     print(f"[DONE] Inference frame extraction complete. Total frames written: {total_written}")
+    if args.tar_per_video:
+        print(
+            f"[DONE] Tar packaging complete. tarballs_created={total_tar_created} "
+            f"frames_archived={total_archived}"
+        )
 
 
 def run_train_mode(args: argparse.Namespace) -> None:

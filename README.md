@@ -164,8 +164,10 @@ Monkey positions in the OFT are traced either manually or detected by artificial
     - Input videos: `data/oft_rhp/videos_downsampled` (1920x1080, FPS=20)
     - Output frames keep source structure under `out-root`, for example:
       `data/oft_rhp/videos_downsampled/H1705011/2026-06-16/D01_*.mp4`
-      -> `tmp/rtdetr_frames_2hz/H1705011/2026-06-16/D01_*_f000001.jpg`
+      -> `tmp/rtdetr_frames_2hz/H1705011/2026-06-16/D01_*/D01_*_f000001.jpg`
     - Frames should be kept for downstream overlay and stitching QC.
+    - Optional transfer optimization: package each video folder into one tarball
+      (for example `D01_*.tar`) to reduce small-file transfer overhead.
 
   - Example (single monkey/date):
   ```bash
@@ -176,6 +178,20 @@ Monkey positions in the OFT are traced either manually or detected by artificial
     --out-root tmp/rtdetr_frames_2hz \
     --sample-fps 2 \
     --recursive
+  ```
+
+  - Example (single monkey/date, package one tar per video after extraction):
+  ```bash
+  conda activate det
+  python scripts/prepare_ultralytics_bbox_dataset.py \
+    --mode inference \
+    --videos-dir data/oft_rhp/videos_downsampled/H1705011/2026-06-16 \
+    --out-root tmp/rtdetr_frames_2hz \
+    --sample-fps 2 \
+    --recursive \
+    --tar-per-video \
+    --tar-mode tar \
+    --tar-remove-frames
   ```
 
   - dSQ joblist generation for Step 1 (one job per video):
@@ -190,10 +206,54 @@ Monkey positions in the OFT are traced either manually or detected by artificial
     --sample-fps 2
   ```
 
+  - dSQ joblist generation with tar-per-video packaging:
+  ```bash
+  python scripts/parse_ffmpeg_joblist.py extract-frames \
+    data/oft_rhp/videos_downsampled/H1705011 \
+    -j scripts/shell/joblist_extract_frames_H1705011_tar.txt \
+    --recursive \
+    --script scripts/prepare_ultralytics_bbox_dataset.py \
+    --videos-root data/oft_rhp/videos_downsampled \
+    --frames-out-root tmp/rtdetr_frames_2hz \
+    --sample-fps 2 \
+    --tar-per-video \
+    --tar-mode tar \
+    --tar-remove-frames
+  ```
+  Notes:
+  - Use `--tar-mode tar.gz` only if network is much slower than CPU.
+  - Keep raw frames (omit `--tar-remove-frames`) if overlay/stitching QC is needed before transfer.
+
   - Step 2: RT-DETR inference on pre-extracted frames
     - Script: `scripts/infer_rtdetr_batch.py`
+    - Input frames: `tmp/rtdetr_frames_2hz/{monkey_id}/{date}/{video_name}/{video_name}_f000123.jpg`
     - Output CSVs: `results/predictions/{monkey_id}/{date}/{video_name}_preds.csv`
     - CSV includes `bbox_x1`, `bbox_y1`, `bbox_x2`, `bbox_y2`, `bbox_cx`, `bbox_cy`, confidence.
+
+  - If Step 1 used tar-per-video packaging, untar on the GPU server first:
+  ```bash
+  # Extract all .tar files in place under tmp/rtdetr_frames_2hz
+  find tmp/rtdetr_frames_2hz -type f -name '*.tar' -print0 \
+    | xargs -0 -I{} tar -xf '{}' -C "$(dirname '{}')"
+
+  # Or, for .tar.gz archives:
+  find tmp/rtdetr_frames_2hz -type f -name '*.tar.gz' -print0 \
+    | xargs -0 -I{} tar -xzf '{}' -C "$(dirname '{}')"
+  ```
+  - This recreates per-video frame folders expected by `infer_rtdetr_batch.py`.
+
+  - Example (all dates for one monkey):
+  ```bash
+  conda activate det
+  python scripts/infer_rtdetr_batch.py \
+    --model runs/detect/results/ultralytics/rtdetr_monkey_bbox_H1705011_2026-06-16_8gpu-3/weights/best.pt \
+    --frames-root tmp/rtdetr_frames_2hz \
+    --monkey-id H1705011 \
+    --imgsz 960 \
+    --batch 96 \
+    --device 0 \
+    --out-root results/predictions
+  ```
   - For GPU OOM, reduce `--batch` (for example: 64 -> 32 -> 16).
   
 
@@ -230,7 +290,7 @@ DLC_RHESUS/
 │   ├── bbox_labeler.py             # Bounding box labeler
 │   ├── prepare_ultralytics_bbox_dataset.py  # Build YOLO-format dataset from bbox CSV + videos
 │   ├── train_rtdetr.py             # RT-DETR training entrypoint
-│   ├── infer_rtdetr_batch.py       # Batch RT-DETR inference from extracted frames/videos
+│   ├── infer_rtdetr_batch.py       # Batch RT-DETR inference from extracted frames
 │   ├── setup_deeplabcut_project.py # Setup DLC project
 │   ├── downsample_ffmpeg.py        # Downsample 4K raw video to arbitrary resolution
 │   ├── segment_ffmpeg.py           # Segment video based on visibility (previously preprocess_ffmpeg.py)

@@ -349,6 +349,27 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Overwrite existing extracted frames for each video.",
     )
+    extract_frames.add_argument(
+        "--tar-per-video",
+        action="store_true",
+        help="Create one tar archive per extracted video frame folder.",
+    )
+    extract_frames.add_argument(
+        "--tar-mode",
+        choices=["tar", "tar.gz"],
+        default="tar",
+        help="Archive format passed to prepare_ultralytics_bbox_dataset.py.",
+    )
+    extract_frames.add_argument(
+        "--tar-overwrite",
+        action="store_true",
+        help="Overwrite existing tar archive when --tar-per-video is enabled.",
+    )
+    extract_frames.add_argument(
+        "--tar-remove-frames",
+        action="store_true",
+        help="Remove extracted frame files after tar creation.",
+    )
 
     return parser.parse_args()
 
@@ -665,6 +686,21 @@ def expected_extract_output_dir(
     return frames_out_root / rel_path.parent / rel_path.stem
 
 
+def expected_extract_tar_path(
+    video_path: Path,
+    videos_root: Path,
+    frames_out_root: Path,
+    tar_mode: str,
+) -> Path:
+    output_dir = expected_extract_output_dir(
+        video_path=video_path,
+        videos_root=videos_root,
+        frames_out_root=frames_out_root,
+    )
+    suffix = ".tar.gz" if tar_mode == "tar.gz" else ".tar"
+    return output_dir.parent / f"{video_path.stem}{suffix}"
+
+
 def build_extract_frames_command(
     video_path: Path,
     args: argparse.Namespace,
@@ -689,6 +725,12 @@ def build_extract_frames_command(
         "--image-ext",
         args.image_ext,
     ]
+    if args.tar_per_video:
+        cmd.extend(["--tar-per-video", "--tar-mode", args.tar_mode])
+        if args.tar_overwrite:
+            cmd.append("--tar-overwrite")
+        if args.tar_remove_frames:
+            cmd.append("--tar-remove-frames")
     if args.overwrite:
         cmd.append("--overwrite")
     return quote_command(cmd)
@@ -707,15 +749,26 @@ def run_extract_frames(args: argparse.Namespace) -> int:
 
     for video_path in video_paths:
         if args.skip_existing and not args.overwrite:
-            output_dir = expected_extract_output_dir(
-                video_path=video_path,
-                videos_root=args.videos_root,
-                frames_out_root=args.frames_out_root,
-            )
-            existing = list(output_dir.glob(f"{video_path.stem}_f*.{img_ext}"))
-            if existing:
-                n_existing += 1
-                continue
+            if args.tar_per_video:
+                tar_path = expected_extract_tar_path(
+                    video_path=video_path,
+                    videos_root=args.videos_root,
+                    frames_out_root=args.frames_out_root,
+                    tar_mode=args.tar_mode,
+                )
+                if tar_path.exists():
+                    n_existing += 1
+                    continue
+            else:
+                output_dir = expected_extract_output_dir(
+                    video_path=video_path,
+                    videos_root=args.videos_root,
+                    frames_out_root=args.frames_out_root,
+                )
+                existing = list(output_dir.glob(f"{video_path.stem}_f*.{img_ext}"))
+                if existing:
+                    n_existing += 1
+                    continue
 
         commands.append(build_extract_frames_command(video_path, args))
 
