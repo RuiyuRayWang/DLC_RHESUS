@@ -28,6 +28,9 @@ deeplabcut_projects/
 # Large data files - exclude but keep folder structure
 # ------------------------------------------------------------------------------
 
+# snapshots
+*.pt
+
 # pickles
 *.pickle
 *.pkl
