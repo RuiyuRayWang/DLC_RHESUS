@@ -730,6 +730,36 @@ class BBoxValidateLabeler:
             self.save()
             self.changes_since_save = 0
 
+    def _clear_current_pred_row(self) -> None:
+        frame_num = self._current_frame_num()
+        row_idx = self.pred_df.index[self.pred_df["video_frame"] == frame_num]
+        if len(row_idx) == 0:
+            return
+        self.pred_df = self.pred_df.drop(index=row_idx).reset_index(drop=True)
+        self._note_change()
+
+    def _mark_current_no_monkey(self) -> None:
+        frame_num = self._current_frame_num()
+        row_idx = self.pred_df.index[self.pred_df["video_frame"] == frame_num]
+        if len(row_idx) == 0:
+            new_row = {
+                "video_frame": frame_num,
+                "monkey_visible": False,
+                "bbox_x1": np.nan,
+                "bbox_y1": np.nan,
+                "bbox_x2": np.nan,
+                "bbox_y2": np.nan,
+            }
+            self.pred_df = pd.concat([self.pred_df, pd.DataFrame([new_row])], ignore_index=True)
+        else:
+            idx = row_idx[0]
+            self.pred_df.at[idx, "monkey_visible"] = False
+            self.pred_df.at[idx, "bbox_x1"] = np.nan
+            self.pred_df.at[idx, "bbox_y1"] = np.nan
+            self.pred_df.at[idx, "bbox_x2"] = np.nan
+            self.pred_df.at[idx, "bbox_y2"] = np.nan
+        self._note_change()
+
     def _mouse_cb(self, event, mx, my, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
             if not self._is_in_image_area(mx, my):
@@ -850,7 +880,6 @@ class BBoxValidateLabeler:
             print("\nERROR: Failed to create OpenCV GUI window.")
             print(f"Details: {exc}")
             print("Check DISPLAY, X11 forwarding, or your OpenCV GUI backend.")
-            self.video.release()
             raise SystemExit(1)
 
         print("\nWindow opened. Draw a box around the monkey. Press Q or ESC to save and quit.\n")
@@ -867,24 +896,15 @@ class BBoxValidateLabeler:
             elif key in (ord("p"), 81):
                 self._prev_frame()
             elif key in (ord("u"),):
-                fn = self._current_frame_num()
-                self.annotations.pop(fn, None)
-                self._note_annotation_change()
+                self._clear_current_pred_row()
             elif key in (ord("m"),):
-                ann = self._current_ann()
-                ann.visible = False
-                ann.bbox = None
-                self._note_annotation_change()
+                self._mark_current_no_monkey()
                 self._next_frame()
-            elif key in (ord("a"),):
-                self.auto_advance = not self.auto_advance
-                print(f"Auto-advance after drawing: {self.auto_advance}")
             elif key in (13, 10, 32):
                 self._next_frame()
 
         cv2.destroyAllWindows()
         df = self.save()
-        self.video.release()
         return df
 
 
