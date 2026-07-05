@@ -84,6 +84,8 @@ DEFAULT_SCALE = 0.4
 DEFAULT_CACHE_SIZE = 25
 DEFAULT_AUTOSAVE_EVERY = 25
 MIN_BOX_SIZE = 5
+HEADER_BAR_H = 56
+FOOTER_BAR_H = 52
 FRAME_INDEX_RE = re.compile(r"_f(\d+)$")
 
 C_YELLOW = (0, 220, 220)
@@ -363,6 +365,8 @@ class BBoxLabeler:
 
         self.win = "MonkeyBBox"
         self.win_title = f"Monkey bbox - {self.video_path.name}"
+        self.header_bar_h = HEADER_BAR_H
+        self.footer_bar_h = FOOTER_BAR_H
 
         if self.output_csv.exists():
             self._load_existing()
@@ -411,23 +415,31 @@ class BBoxLabeler:
         return self.annotations[fn]
 
     def _display_to_original(self, x: int, y: int) -> Tuple[int, int]:
+        y = y - self.header_bar_h
         ox = int(round(x / self.display_scale))
         oy = int(round(y / self.display_scale))
         ox = max(0, min(self.video.width - 1, ox))
         oy = max(0, min(self.video.height - 1, oy))
         return ox, oy
 
+    def _is_in_image_area(self, x: int, y: int) -> bool:
+        disp_w = int(self.video.width * self.display_scale)
+        disp_h = int(self.video.height * self.display_scale)
+        return 0 <= x < disp_w and self.header_bar_h <= y < (self.header_bar_h + disp_h)
+
     def _box_to_display(self, box: BBox) -> BBox:
         x1, y1, x2, y2 = box
         return (
             int(round(x1 * self.display_scale)),
-            int(round(y1 * self.display_scale)),
+            int(round(y1 * self.display_scale)) + self.header_bar_h,
             int(round(x2 * self.display_scale)),
-            int(round(y2 * self.display_scale)),
+            int(round(y2 * self.display_scale)) + self.header_bar_h,
         )
 
     def _mouse_cb(self, event, mx, my, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
+            if not self._is_in_image_area(mx, my):
+                return
             self.dragging = True
             self.drag_start = self._display_to_original(mx, my)
             self.drag_current = self.drag_start
@@ -475,24 +487,29 @@ class BBoxLabeler:
     def _render(self) -> np.ndarray:
         fn = self._current_frame_num()
         frame = self.video.read(fn)
-        disp = cv2.resize(
+        frame_disp = cv2.resize(
             frame,
             (int(self.video.width * self.display_scale), int(self.video.height * self.display_scale)),
             interpolation=cv2.INTER_AREA,
         )
-        dh, dw = disp.shape[:2]
+        dh, dw = frame_disp.shape[:2]
+        ch = dh + self.header_bar_h + self.footer_bar_h
+        disp = np.full((ch, dw, 3), 20, dtype=np.uint8)
+        disp[self.header_bar_h:self.header_bar_h + dh, 0:dw] = frame_disp
+        y_image_top = self.header_bar_h
+        y_image_bottom = self.header_bar_h + dh
 
         ann = self.annotations.get(fn, FrameAnnotation())
 
         if ann.visible is False:
-            cv2.drawMarker(disp, (dw // 2, dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
-            cv2.putText(disp, "NO MONKEY", (dw // 2 - 110, dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, C_RED, 3)
+            cv2.drawMarker(disp, (dw // 2, y_image_top + dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
+            cv2.putText(disp, "NO MONKEY", (dw // 2 - 110, y_image_top + dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, C_RED, 3)
         elif ann.bbox is not None:
             x1, y1, x2, y2 = self._box_to_display(ann.bbox)
             cv2.rectangle(disp, (x1, y1), (x2, y2), C_GREEN, 3)
             cv2.putText(disp, "monkey", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
         elif ann.visible is True:
-            cv2.putText(disp, "VISIBLE - DRAW BOX", (30, dh - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
+            cv2.putText(disp, "VISIBLE - DRAW BOX", (30, y_image_bottom - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
 
         if self.dragging and self.drag_start is not None and self.drag_current is not None:
             preview = clamp_box((*self.drag_start, *self.drag_current), self.video.width, self.video.height)
@@ -501,7 +518,7 @@ class BBoxLabeler:
                 cv2.rectangle(disp, (x1, y1), (x2, y2), C_BLUE, 2)
 
         n_box, n_pending, n_no, n_any = self._annotated_counts()
-        cv2.rectangle(disp, (0, 0), (dw, 55), C_BLACK, -1)
+        cv2.rectangle(disp, (0, 0), (dw, self.header_bar_h), C_BLACK, -1)
         header = (
             f"sample {self.current_idx + 1}/{len(self.frame_nums)} | "
             f"video frame #{fn} ({fn / self.fps:.1f}s) | "
@@ -509,13 +526,13 @@ class BBoxLabeler:
         )
         cv2.putText(disp, header, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.68, C_YELLOW, 2, cv2.LINE_AA)
 
-        cv2.rectangle(disp, (0, dh - 42), (dw, dh), C_BLACK, -1)
+        cv2.rectangle(disp, (0, y_image_bottom), (dw, ch), C_BLACK, -1)
         footer = "Drag=box  Enter/Space=accept+next  A=auto  M=no-monkey  N/P=next/prev  U=undo  S=save  Q=save+quit"
         if self.auto_advance:
             footer = "AUTO ON  " + footer
-        cv2.putText(disp, footer, (10, dh - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_GRAY, 1, cv2.LINE_AA)
+        cv2.putText(disp, footer, (10, ch - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_GRAY, 1, cv2.LINE_AA)
 
-        y0 = dh - 45
+        y0 = y_image_bottom + 4
         cv2.rectangle(disp, (0, y0), (dw, y0 + 4), (60, 60, 60), -1)
         for i, frame_num in enumerate(self.frame_nums):
             a = self.annotations.get(frame_num)
@@ -636,6 +653,8 @@ class BBoxValidateLabeler:
 
         self.win = "MonkeyBBoxValidate"
         self.win_title = f"Monkey bbox validate - {self.frames_dir.name}"
+        self.header_bar_h = HEADER_BAR_H
+        self.footer_bar_h = FOOTER_BAR_H
 
         print(f"\nFrames dir: {self.frames_dir}")
         print(f"Predictions CSV: {self.predictions_csv}")
@@ -678,19 +697,25 @@ class BBoxValidateLabeler:
         return parse_visible(row.get("monkey_visible"))
 
     def _display_to_original(self, x: int, y: int) -> Tuple[int, int]:
+        y = y - self.header_bar_h
         ox = int(round(x / self.display_scale))
         oy = int(round(y / self.display_scale))
         ox = max(0, min(self.width - 1, ox))
         oy = max(0, min(self.height - 1, oy))
         return ox, oy
 
+    def _is_in_image_area(self, x: int, y: int) -> bool:
+        disp_w = int(self.width * self.display_scale)
+        disp_h = int(self.height * self.display_scale)
+        return 0 <= x < disp_w and self.header_bar_h <= y < (self.header_bar_h + disp_h)
+
     def _box_to_display(self, box: BBox) -> BBox:
         x1, y1, x2, y2 = box
         return (
             int(round(x1 * self.display_scale)),
-            int(round(y1 * self.display_scale)),
+            int(round(y1 * self.display_scale)) + self.header_bar_h,
             int(round(x2 * self.display_scale)),
-            int(round(y2 * self.display_scale)),
+            int(round(y2 * self.display_scale)) + self.header_bar_h,
         )
 
     def _next_frame(self):
@@ -707,6 +732,8 @@ class BBoxValidateLabeler:
 
     def _mouse_cb(self, event, mx, my, flags, param):
         if event == cv2.EVENT_LBUTTONDOWN:
+            if not self._is_in_image_area(mx, my):
+                return
             self.dragging = True
             self.drag_start = self._display_to_original(mx, my)
             self.drag_current = self.drag_start
@@ -750,25 +777,30 @@ class BBoxValidateLabeler:
         frame = cv2.imread(str(frame_path))
         if frame is None:
             raise RuntimeError(f"Could not read frame: {frame_path}")
-        disp = cv2.resize(
+        frame_disp = cv2.resize(
             frame,
             (int(self.width * self.display_scale), int(self.height * self.display_scale)),
             interpolation=cv2.INTER_AREA,
         )
-        dh, dw = disp.shape[:2]
+        dh, dw = frame_disp.shape[:2]
+        ch = dh + self.header_bar_h + self.footer_bar_h
+        disp = np.full((ch, dw, 3), 20, dtype=np.uint8)
+        disp[self.header_bar_h:self.header_bar_h + dh, 0:dw] = frame_disp
+        y_image_top = self.header_bar_h
+        y_image_bottom = self.header_bar_h + dh
 
         pred_visible = self._current_pred_visible()
         pred_box = self._current_pred_box()
 
         if pred_visible is False:
-            cv2.drawMarker(disp, (dw // 2, dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
-            cv2.putText(disp, "PRED: NO MONKEY", (20, dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, C_RED, 3)
+            cv2.drawMarker(disp, (dw // 2, y_image_top + dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
+            cv2.putText(disp, "PRED: NO MONKEY", (20, y_image_top + dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, C_RED, 3)
         elif pred_box is not None:
             x1, y1, x2, y2 = self._box_to_display(pred_box)
             cv2.rectangle(disp, (x1, y1), (x2, y2), C_GREEN, 3)
             cv2.putText(disp, "PRED", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
         else:
-            cv2.putText(disp, "NO PREDICTION", (20, dh - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
+            cv2.putText(disp, "NO PREDICTION", (20, y_image_bottom - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
 
         if self.dragging and self.drag_start is not None and self.drag_current is not None:
             preview = clamp_box((*self.drag_start, *self.drag_current), self.width, self.height)
@@ -776,7 +808,7 @@ class BBoxValidateLabeler:
                 x1, y1, x2, y2 = self._box_to_display(preview)
                 cv2.rectangle(disp, (x1, y1), (x2, y2), C_BLUE, 2)
 
-        cv2.rectangle(disp, (0, 0), (dw, 55), C_BLACK, -1)
+        cv2.rectangle(disp, (0, 0), (dw, self.header_bar_h), C_BLACK, -1)
         header = (
             f"frame {self.current_idx + 1}/{len(self.frame_paths)} | "
             f"video frame #{frame_num} | "
@@ -784,9 +816,9 @@ class BBoxValidateLabeler:
         )
         cv2.putText(disp, header, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.68, C_YELLOW, 2, cv2.LINE_AA)
 
-        cv2.rectangle(disp, (0, dh - 42), (dw, dh), C_BLACK, -1)
+        cv2.rectangle(disp, (0, y_image_bottom), (dw, ch), C_BLACK, -1)
         footer = "Drag=correct box  Enter/Space=next  N/P=next/prev  U=clear pred row  S=save  Q=save+quit"
-        cv2.putText(disp, footer, (10, dh - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_GRAY, 1, cv2.LINE_AA)
+        cv2.putText(disp, footer, (10, ch - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_GRAY, 1, cv2.LINE_AA)
         return disp
 
     def save(self) -> pd.DataFrame:
