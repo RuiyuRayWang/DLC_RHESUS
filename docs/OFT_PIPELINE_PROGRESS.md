@@ -1,65 +1,56 @@
-# OFT Video Analysis Pipeline — Progress Summary
+# OFT Pipeline Status Snapshot
 
-**Monkey:** H1705011  
-**Session:** 2026-05-25  
-**Last updated:** 2026-06-09
+**Project:** PAL_ENHANCER OFT tracking  
+**Environment:** `video_tracking`  
+**Updated:** 2026-06-15
 
----
+## Current state
 
-## 🚀 Current Status
+The macOS OFT pipeline is operational end-to-end:
 
-**Phase:** Manual labeling ready - **All calibrations complete!** ✅  
-**Blocker:** None
+1. GUI calibration and manual labeling
+2. Anchor-based multi-video time alignment
+3. Real-world trajectory fusion
+4. Window selection for quantification
+5. Daily behavior titration plots in RStudio/Posit
 
-### Completed ✅
-- [x] All pipeline scripts written and tested
-- [x] Qt6 GUI issue identified and fixed (window name special characters)
-- [x] Error handling added to both GUI tools
-- [x] Diagnostic tools created
-- [x] Documentation complete
-- [x] **All camera calibrations complete!** ✅
+## Stable workflow
 
-### Next Steps 📋
-1. ✅ ~~Run camera calibration~~ - **All done!**
-2. **Label monkey positions** per camera - **START HERE**
-   - Use: `python scripts/manual_labeler.py --camera D2`
-   - See [MANUAL_LABELER_REFERENCE.md](MANUAL_LABELER_REFERENCE.md) for full guide
-3. **Fuse trajectories** into real-world coordinates
-4. **Analyze results** in notebook
+Use this sequence for each session:
 
-### Calibration Results
-| Camera | Status | Points Labeled | Floor Error | solvePnP Error | Notes |
-|--------|--------|----------------|-------------|----------------|-------|
-| D2 | ✅ Complete | 8/8 | **0.00 cm** | 62.66 px | Perfect! |
-| D3 | ✅ Complete | 8/8 | TBD | TBD | Ready for labeling |
-| D4 | ✅ Complete | 8/8 | TBD | TBD | Ready for labeling |
-| D1 | ⏸ No video | - | - | - | May need different session |
+1. Label videos (`manual_labeler.py`)
+2. Generate `label_time_anchors.csv` (`generate_time_anchor_template.py`)
+3. Curate `anchor_timestamp` manually (VSPlayer)
+4. Fuse trajectory (`fuse_trajectories.py`)
+5. Select analysis window (`select_time_window.py`)
+6. Plot daily titration metrics (`scripts/plot_pd_behavior_titration.R`)
 
----
+Primary reference:
+- `docs/MULTI_VIDEO_WORKFLOW.md`
 
-## Overview
+## Key implementation notes
 
-The goal is to reconstruct real-world (cm) movement trajectories for a macaque
-monkey in a **322 × 322 cm open-field arena**, using video recordings from
-four wide-angle cameras (D1–D4) positioned above each quadrant.
+- Paths are repository-relative (`PROJECT_ROOT` style), no Linux hardcoded paths.
+- Fusion uses anchor-based absolute time per file.
+- Projection cleanup is active (camera-region filtering and arena clipping).
+- Selector displays window metrics including distance, max velocity, movement bouts, mean bout duration, and active time.
+- `selected_time_window.json` now exports active-period mean velocity, immobility time, and window-derived active/immobility durations.
+- Daily titration plots are generated interactively in RStudio with explicit `...` gaps for missing dates.
 
-```
-(0,0) ────────── (161,0) ────────── (322,0)
-  │                  │                  │
-  │   D1 (top-left)  │  D2 (top-right)  │
-  │                  │                  │
-(0,161) ──────── (161,161) ──────── (322,161)
-  │                  │                  │
-  │  D3 (bottom-left)│ D4 (bottom-right)│
-  │                  │                  │
-(0,322) ──────── (161,322) ──────── (322,322)
-```
+## Core outputs per session
 
-Arena height: **105 cm**. Cameras are hardware-synced (same trigger).
+- `trajectory_realworld.csv`
+- `movement_bouts.csv`
+- `trajectory_summary.json`
+- `selected_time_window.json`
+- `pd_behavior_titration_metrics.csv` (optional QC table)
 
----
+## Open items
 
-## Pipeline Architecture
+- Keep anchor timestamps curated and auditable (`method`, `notes`).
+- Re-run notebook visual QC when fusion parameters change.
+- Optional: evaluate additional QC summaries for projection filtering.
+- Optional: use the R titration script for a quick longitudinal summary across days.
 
 ```
 Videos (D1–D4)

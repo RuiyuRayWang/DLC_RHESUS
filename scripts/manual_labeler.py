@@ -38,7 +38,7 @@ from typing import Dict, Optional, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 VIDEO_BASE = PROJECT_ROOT / 'data' / 'oft_rhp' / 'H1705011' / '2026-05-25'
-OUTPUT_BASE = PROJECT_ROOT / 'results' / 'oft_analysis' / 'H1705011' / '2026-05-25'
+OUTPUT_BASE = PROJECT_ROOT / 'results' / 'oft_analysis'
 
 # Camera → video file prefix and quadrant label
 CAMERA_INFO = {
@@ -499,8 +499,15 @@ def main():
     video = Path(args.video) if args.video else _find_video(camera, VIDEO_BASE)
 
     # Resolve output CSV
-    out_csv = (Path(args.output) if args.output
-               else OUTPUT_BASE / f'labels_{video.stem}.csv')
+    if args.mode == 'visibility':
+        out_csv = (Path(args.output) if args.output
+                else OUTPUT_BASE / f'visibility_{video.stem}.csv')
+    elif args.mode == 'head':
+        out_csv = (Path(args.output) if args.output
+                else OUTPUT_BASE / f'{video.stem}.csv')
+    else:
+        out_csv = (Path(args.output) if args.output
+                else OUTPUT_BASE / f'{video.stem}.csv')
 
     labeler = ManualLabeler(
         camera=camera,
