@@ -2,7 +2,15 @@
 """
 Bounding-box labeler for monkey behavioral videos.
 
-This is an OpenCV GUI for drawing one monkey bounding box per sampled video frame.
+This script has two modes:
+
+1. annotate
+    OpenCV GUI for drawing one monkey bounding box per sampled video frame.
+
+2. validate
+    OpenCV GUI for reviewing RT-DETR predictions on extracted JPG/PNG frames and
+    correcting the output CSV in place.
+
 It is designed for detector annotation when video filenames no longer encode camera IDs
 such as D01_, D02_, etc.
 
@@ -20,6 +28,11 @@ Usage examples:
 
     # Export annotated positive frames as JPEGs while saving the CSV
     python scripts/bbox_labeler.py --video path/to/video.mp4 --save-images results/bbox_images/trial_001
+
+    # Validate RT-DETR predictions on extracted frames
+    python scripts/bbox_labeler.py --mode validate \
+        --frames-dir tmp/rtdetr_frames_2hz/H1705011/2026-06-27/D01_20260627134058_downsampled \
+        --predictions-csv results/predictions/H1705011/2026-06-27/D01_20260627134058_downsampled_preds.csv
 
 Controls:
     Left drag       draw or replace monkey bounding box
@@ -71,6 +84,7 @@ DEFAULT_SCALE = 0.4
 DEFAULT_CACHE_SIZE = 25
 DEFAULT_AUTOSAVE_EVERY = 25
 MIN_BOX_SIZE = 5
+FRAME_INDEX_RE = re.compile(r"_f(\d+)$")
 
 C_YELLOW = (0, 220, 220)
 C_GREEN = (80, 200, 80)
@@ -134,6 +148,22 @@ def parse_video_timestamp(video_path: Path) -> str:
     except ValueError:
         return "unknown"
     return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_frame_index_from_image(frame_path: Path) -> Optional[int]:
+    match = FRAME_INDEX_RE.search(frame_path.stem)
+    if match is None:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def boxes_close(box_a: Optional[BBox], box_b: Optional[BBox], atol: int = 1) -> bool:
+    if box_a is None or box_b is None:
+        return False
+    return all(abs(int(a) - int(b)) <= atol for a, b in zip(box_a, box_b))
 
 class FrameDecodeError(RuntimeError):
     """Raised when a requested video frame cannot be decoded."""
@@ -561,6 +591,214 @@ class BBoxLabeler:
         print(f"  boxes: {n_box}   visible-without-box: {n_pending}   no-monkey: {n_no}")
         return df
 
+
+class BBoxValidateLabeler:
+    def __init__(
+        self,
+        frames_dir: Path,
+        predictions_csv: Path,
+        output_csv: Optional[Path] = None,
+        display_scale: float = DEFAULT_SCALE,
+        autosave_every: int = DEFAULT_AUTOSAVE_EVERY,
+    ):
+        self.frames_dir = Path(frames_dir)
+        self.predictions_csv = Path(predictions_csv)
+        self.output_csv = Path(output_csv) if output_csv else self.predictions_csv
+        self.display_scale = float(display_scale)
+        self.autosave_every = int(autosave_every)
+        self.changes_since_save = 0
+
+        if not self.frames_dir.exists():
+            raise FileNotFoundError(f"Frames directory does not exist: {self.frames_dir}")
+        if not self.predictions_csv.exists():
+            raise FileNotFoundError(f"Predictions CSV does not exist: {self.predictions_csv}")
+
+        self.frame_paths = sorted(
+            [p for p in self.frames_dir.iterdir() if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}]
+        )
+        if not self.frame_paths:
+            raise RuntimeError(f"No image frames found in: {self.frames_dir}")
+
+        self.pred_df = pd.read_csv(self.predictions_csv)
+        if "video_frame" not in self.pred_df.columns:
+            raise ValueError(f"{self.predictions_csv}: missing video_frame column")
+
+        self.frame_map = self._build_frame_map()
+        self.current_idx = 0
+        self.dragging = False
+        self.drag_start: Optional[Tuple[int, int]] = None
+        self.drag_current: Optional[Tuple[int, int]] = None
+
+        first_frame = cv2.imread(str(self.frame_paths[0]))
+        if first_frame is None:
+            raise RuntimeError(f"Could not read frame: {self.frame_paths[0]}")
+        self.height, self.width = first_frame.shape[:2]
+
+        self.win = "MonkeyBBoxValidate"
+        self.win_title = f"Monkey bbox validate - {self.frames_dir.name}"
+
+        print(f"\nFrames dir: {self.frames_dir}")
+        print(f"Predictions CSV: {self.predictions_csv}")
+        print(f"Output CSV: {self.output_csv}")
+        print(f"Frames loaded: {len(self.frame_paths)}")
+
+    def _build_frame_map(self) -> Dict[int, Path]:
+        frame_map: Dict[int, Path] = {}
+        for frame_path in self.frame_paths:
+            frame_idx = parse_frame_index_from_image(frame_path)
+            if frame_idx is None:
+                continue
+            frame_map[frame_idx] = frame_path
+        if not frame_map:
+            raise RuntimeError(f"No frame indices could be parsed from {self.frames_dir}")
+        return frame_map
+
+    def _current_frame_num(self) -> int:
+        return int(parse_frame_index_from_image(self.frame_paths[self.current_idx]) or 0)
+
+    def _pred_row(self, frame_num: int) -> pd.Series:
+        matches = self.pred_df[self.pred_df["video_frame"] == frame_num]
+        if matches.empty:
+            return pd.Series(dtype=object)
+        return matches.iloc[0]
+
+    def _current_pred_box(self) -> Optional[BBox]:
+        row = self._pred_row(self._current_frame_num())
+        if row.empty:
+            return None
+        vals = [row.get(c) for c in ("bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2")]
+        if not all(pd.notna(v) for v in vals):
+            return None
+        return tuple(int(round(float(v))) for v in vals)  # type: ignore[return-value]
+
+    def _current_pred_visible(self) -> Optional[bool]:
+        row = self._pred_row(self._current_frame_num())
+        if row.empty:
+            return None
+        return parse_visible(row.get("monkey_visible"))
+
+    def _display_to_original(self, x: int, y: int) -> Tuple[int, int]:
+        ox = int(round(x / self.display_scale))
+        oy = int(round(y / self.display_scale))
+        ox = max(0, min(self.width - 1, ox))
+        oy = max(0, min(self.height - 1, oy))
+        return ox, oy
+
+    def _box_to_display(self, box: BBox) -> BBox:
+        x1, y1, x2, y2 = box
+        return (
+            int(round(x1 * self.display_scale)),
+            int(round(y1 * self.display_scale)),
+            int(round(x2 * self.display_scale)),
+            int(round(y2 * self.display_scale)),
+        )
+
+    def _next_frame(self):
+        self.current_idx = min(len(self.frame_paths) - 1, self.current_idx + 1)
+
+    def _prev_frame(self):
+        self.current_idx = max(0, self.current_idx - 1)
+
+    def _note_change(self) -> None:
+        self.changes_since_save += 1
+        if self.autosave_every > 0 and self.changes_since_save >= self.autosave_every:
+            self.save()
+            self.changes_since_save = 0
+
+    def _mouse_cb(self, event, mx, my, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.dragging = True
+            self.drag_start = self._display_to_original(mx, my)
+            self.drag_current = self.drag_start
+        elif event == cv2.EVENT_MOUSEMOVE and self.dragging:
+            self.drag_current = self._display_to_original(mx, my)
+        elif event == cv2.EVENT_LBUTTONUP and self.dragging:
+            self.dragging = False
+            if self.drag_start is None:
+                return
+            end = self._display_to_original(mx, my)
+            box = clamp_box((*self.drag_start, *end), self.width, self.height)
+            self.drag_start = None
+            self.drag_current = None
+            if box is None:
+                print("Ignored tiny box. Draw a larger rectangle.")
+                return
+            frame_num = self._current_frame_num()
+            row_idx = self.pred_df.index[self.pred_df["video_frame"] == frame_num]
+            if len(row_idx) == 0:
+                new_row = {
+                    "video_frame": frame_num,
+                    "monkey_visible": True,
+                    "bbox_x1": box[0],
+                    "bbox_y1": box[1],
+                    "bbox_x2": box[2],
+                    "bbox_y2": box[3],
+                }
+                self.pred_df = pd.concat([self.pred_df, pd.DataFrame([new_row])], ignore_index=True)
+            else:
+                idx = row_idx[0]
+                self.pred_df.at[idx, "monkey_visible"] = True
+                self.pred_df.at[idx, "bbox_x1"] = box[0]
+                self.pred_df.at[idx, "bbox_y1"] = box[1]
+                self.pred_df.at[idx, "bbox_x2"] = box[2]
+                self.pred_df.at[idx, "bbox_y2"] = box[3]
+            self._note_change()
+
+    def _render(self) -> np.ndarray:
+        frame_num = self._current_frame_num()
+        frame_path = self.frame_paths[self.current_idx]
+        frame = cv2.imread(str(frame_path))
+        if frame is None:
+            raise RuntimeError(f"Could not read frame: {frame_path}")
+        disp = cv2.resize(
+            frame,
+            (int(self.width * self.display_scale), int(self.height * self.display_scale)),
+            interpolation=cv2.INTER_AREA,
+        )
+        dh, dw = disp.shape[:2]
+
+        pred_visible = self._current_pred_visible()
+        pred_box = self._current_pred_box()
+
+        if pred_visible is False:
+            cv2.drawMarker(disp, (dw // 2, dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
+            cv2.putText(disp, "PRED: NO MONKEY", (20, dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, C_RED, 3)
+        elif pred_box is not None:
+            x1, y1, x2, y2 = self._box_to_display(pred_box)
+            cv2.rectangle(disp, (x1, y1), (x2, y2), C_GREEN, 3)
+            cv2.putText(disp, "PRED", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
+        else:
+            cv2.putText(disp, "NO PREDICTION", (20, dh - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
+
+        if self.dragging and self.drag_start is not None and self.drag_current is not None:
+            preview = clamp_box((*self.drag_start, *self.drag_current), self.width, self.height)
+            if preview is not None:
+                x1, y1, x2, y2 = self._box_to_display(preview)
+                cv2.rectangle(disp, (x1, y1), (x2, y2), C_BLUE, 2)
+
+        cv2.rectangle(disp, (0, 0), (dw, 55), C_BLACK, -1)
+        header = (
+            f"frame {self.current_idx + 1}/{len(self.frame_paths)} | "
+            f"video frame #{frame_num} | "
+            f"pred_visible={pred_visible}"
+        )
+        cv2.putText(disp, header, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.68, C_YELLOW, 2, cv2.LINE_AA)
+
+        cv2.rectangle(disp, (0, dh - 42), (dw, dh), C_BLACK, -1)
+        footer = "Drag=correct box  Enter/Space=next  N/P=next/prev  U=clear pred row  S=save  Q=save+quit"
+        cv2.putText(disp, footer, (10, dh - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_GRAY, 1, cv2.LINE_AA)
+        return disp
+
+    def save(self) -> pd.DataFrame:
+        df = self.pred_df.copy()
+        if "video_frame" in df.columns:
+            df = df.sort_values(by=["video_frame"]).reset_index(drop=True)
+        self.output_csv.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(self.output_csv, index=False)
+        self.changes_since_save = 0
+        print(f"Saved validated predictions -> {self.output_csv}")
+        return df
+
     def run(self):
         print(f"\nOpening window: {self.win_title}")
         try:
@@ -620,45 +858,72 @@ class BBoxLabeler:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OpenCV GUI for annotating one monkey bounding box per sampled video frame",
+        description="OpenCV GUI for annotating or validating one monkey bounding box per sampled frame",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--video", "-v", required=True, help="Video file path")
-    parser.add_argument("--output", "-o", default=None, help="Output CSV path")
-    parser.add_argument("--sample-every", "-n", type=int, default=DEFAULT_SAMPLE_EVERY, help="Label every Nth frame")
+    parser.add_argument("--mode", choices=["annotate", "validate"], default="annotate", help="annotate: create bbox labels, validate: review predictions on extracted frames")
+    parser.add_argument("--video", "-v", required=False, help="Video file path for annotate mode")
+    parser.add_argument("--output", "-o", default=None, help="Output CSV path for annotate mode")
+    parser.add_argument("--frames-dir", default=None, help="Directory containing extracted JPG/PNG frames for validate mode")
+    parser.add_argument("--predictions-csv", default=None, help="RT-DETR predictions CSV for validate mode")
+    parser.add_argument("--validated-output", default=None, help="Output CSV path for validate mode (defaults to predictions CSV) ")
+    parser.add_argument("--sample-every", "-n", type=int, default=DEFAULT_SAMPLE_EVERY, help="Label every Nth frame in annotate mode")
     parser.add_argument("--scale", "-s", type=float, default=DEFAULT_SCALE, help="Display scale")
-    parser.add_argument("--fps", type=float, default=DEFAULT_FPS, help="FPS used for time_sec; <=0 uses video metadata")
-    parser.add_argument("--auto-advance", action="store_true", help="Advance immediately after drawing a box")
+    parser.add_argument("--fps", type=float, default=DEFAULT_FPS, help="FPS used for time_sec in annotate mode; <=0 uses video metadata")
+    parser.add_argument("--auto-advance", action="store_true", help="Advance immediately after drawing a box in annotate mode")
     parser.add_argument("--save-images", default=None, help="Optional directory to save positive annotated frames as JPEG")
-    parser.add_argument("--cache-size", type=int, default=DEFAULT_CACHE_SIZE, help="Number of decoded frames to cache")
+    parser.add_argument("--cache-size", type=int, default=DEFAULT_CACHE_SIZE, help="Number of decoded frames to cache in annotate mode")
     parser.add_argument("--autosave-every", type=int, default=DEFAULT_AUTOSAVE_EVERY, help="Autosave after this many annotation changes; 0 disables")
     args = parser.parse_args()
 
-    if args.sample_every <= 0:
-        sys.exit("ERROR: --sample-every must be positive")
     if args.scale <= 0:
         sys.exit("ERROR: --scale must be positive")
 
-    video = Path(args.video).expanduser().resolve()
-    if not video.exists():
-        sys.exit(f"ERROR: Video file does not exist: {video}")
+    if args.mode == "annotate":
+        if not args.video:
+            sys.exit("ERROR: --video is required in annotate mode")
+        if args.sample_every <= 0:
+            sys.exit("ERROR: --sample-every must be positive")
 
-    output_csv = (Path(args.output).expanduser().resolve() if args.output
-                  else OUTPUT_BASE / f"bbox_{video.stem}.csv")
+        video = Path(args.video).expanduser().resolve()
+        if not video.exists():
+            sys.exit(f"ERROR: Video file does not exist: {video}")
 
-    labeler = BBoxLabeler(
-        video_path=video,
-        output_csv=output_csv,
-        sample_every=args.sample_every,
+        output_csv = (Path(args.output).expanduser().resolve() if args.output
+                      else OUTPUT_BASE / f"bbox_{video.stem}.csv")
+
+        labeler = BBoxLabeler(
+            video_path=video,
+            output_csv=output_csv,
+            sample_every=args.sample_every,
+            display_scale=args.scale,
+            fps=args.fps,
+            auto_advance=args.auto_advance,
+            save_images=Path(args.save_images) if args.save_images else None,
+            cache_size=args.cache_size,
+            autosave_every=args.autosave_every,
+        )
+        labeler.run()
+        return
+
+    if not args.frames_dir:
+        sys.exit("ERROR: --frames-dir is required in validate mode")
+    if not args.predictions_csv:
+        sys.exit("ERROR: --predictions-csv is required in validate mode")
+
+    frames_dir = Path(args.frames_dir).expanduser().resolve()
+    predictions_csv = Path(args.predictions_csv).expanduser().resolve()
+    validated_output = Path(args.validated_output).expanduser().resolve() if args.validated_output else predictions_csv
+
+    validator = BBoxValidateLabeler(
+        frames_dir=frames_dir,
+        predictions_csv=predictions_csv,
+        output_csv=validated_output,
         display_scale=args.scale,
-        fps=args.fps,
-        auto_advance=args.auto_advance,
-        save_images=Path(args.save_images) if args.save_images else None,
-        cache_size=args.cache_size,
         autosave_every=args.autosave_every,
     )
-    labeler.run()
+    validator.run()
 
 
 if __name__ == "__main__":

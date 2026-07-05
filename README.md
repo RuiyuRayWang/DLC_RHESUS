@@ -231,14 +231,15 @@ Monkey positions in the OFT are traced either manually or detected by artificial
     - CSV includes `bbox_x1`, `bbox_y1`, `bbox_x2`, `bbox_y2`, `bbox_cx`, `bbox_cy`, confidence.
 
   - If Step 1 used tar-per-video packaging, untar on the GPU server first:
+    requires sudo privilege (amax):
   ```bash
-  # Extract all .tar files in place under tmp/rtdetr_frames_2hz
-  find tmp/rtdetr_frames_2hz -type f -name '*.tar' -print0 \
-    | xargs -0 -I{} tar -xf '{}' -C "$(dirname '{}')"
+  # .tar
+  find /mnt/MyBook2/rtdetr_frames_2hz/H1705011/2026-06-28 -type f -name '*.tar' -print0 \
+    | sudo xargs -0 -I{} sh -c 'tar --no-same-owner -xf "$1" -C "$(dirname "$1")"' _ {}
 
-  # Or, for .tar.gz archives:
-  find tmp/rtdetr_frames_2hz -type f -name '*.tar.gz' -print0 \
-    | xargs -0 -I{} tar -xzf '{}' -C "$(dirname '{}')"
+  # .tar.gz
+  find /mnt/MyBook2/rtdetr_frames_2hz/H1705011/2026-06-28 -type f -name '*.tar.gz' -print0 \
+    | sudo xargs -0 -I{} sh -c 'tar --no-same-owner -xzf "$1" -C "$(dirname "$1")"' _ {}
   ```
   - This recreates per-video frame folders expected by `infer_rtdetr_batch.py`.
 
