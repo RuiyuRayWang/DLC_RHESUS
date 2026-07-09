@@ -17,8 +17,12 @@ such as D01_, D02_, etc.
 Usage examples:
     conda activate video_tracking
 
-    # Label a specific video; this is now required
+    # Label a specific video
     python scripts/bbox_labeler.py --video data/oft_rhp/H1705011/2026-06-15/trial_001.mp4
+
+    # Annotate from an extracted-frames directory instead of a video
+    python scripts/bbox_labeler.py --mode annotate \
+        --frames-dir tmp/rtdetr_frames_2hz/H1705011/2026-06-27/D01_20260627134058_downsampled
 
     # Sample 1 frame/sec from a 20 FPS video
     python scripts/bbox_labeler.py --video path/to/video.mp4 --sample-every 20
@@ -35,7 +39,9 @@ Usage examples:
         --predictions-csv results/predictions/H1705011/2026-06-27/D01_20260627134058_downsampled_preds.csv
 
 Controls:
-    Left drag       draw or replace monkey bounding box
+    Left drag       draw new monkey bounding box
+    Drag handle     resize existing box (corners + edge midpoints)
+    Drag in box     move existing box
     Enter / Space   accept current box and advance
     A               toggle auto-advance after drawing box
     M               mark frame as no monkey visible and advance
@@ -84,6 +90,8 @@ DEFAULT_SCALE = 0.4
 DEFAULT_CACHE_SIZE = 25
 DEFAULT_AUTOSAVE_EVERY = 25
 MIN_BOX_SIZE = 5
+HANDLE_SIZE_PX = 8
+HANDLE_HIT_RADIUS_PX = 14
 HEADER_BAR_H = 56
 FOOTER_BAR_H = 52
 FRAME_INDEX_RE = re.compile(r"_f(\d+)$")
@@ -166,6 +174,65 @@ def boxes_close(box_a: Optional[BBox], box_b: Optional[BBox], atol: int = 1) -> 
     if box_a is None or box_b is None:
         return False
     return all(abs(int(a) - int(b)) <= atol for a, b in zip(box_a, box_b))
+
+
+def point_in_box(pt: Tuple[int, int], box: BBox) -> bool:
+    x, y = pt
+    x1, y1, x2, y2 = box
+    return x1 <= x <= x2 and y1 <= y <= y2
+
+
+def box_handles(box: BBox) -> Dict[str, Tuple[int, int]]:
+    x1, y1, x2, y2 = box
+    cx = (x1 + x2) // 2
+    cy = (y1 + y2) // 2
+    return {
+        "nw": (x1, y1),
+        "n": (cx, y1),
+        "ne": (x2, y1),
+        "e": (x2, cy),
+        "se": (x2, y2),
+        "s": (cx, y2),
+        "sw": (x1, y2),
+        "w": (x1, cy),
+    }
+
+
+def hit_test_box_handle(pt: Tuple[int, int], box: BBox, radius: int) -> Optional[str]:
+    x, y = pt
+    for name, (hx, hy) in box_handles(box).items():
+        if abs(x - hx) <= radius and abs(y - hy) <= radius:
+            return name
+    if point_in_box(pt, box):
+        return "move"
+    return None
+
+
+def apply_box_edit(base_box: BBox, mode: str, drag_start: Tuple[int, int], current: Tuple[int, int]) -> BBox:
+    x1, y1, x2, y2 = base_box
+    sx, sy = drag_start
+    cx, cy = current
+    dx = cx - sx
+    dy = cy - sy
+
+    if mode == "move":
+        return x1 + dx, y1 + dy, x2 + dx, y2 + dy
+
+    nx1, ny1, nx2, ny2 = x1, y1, x2, y2
+    if "w" in mode:
+        nx1 = x1 + dx
+    if "e" in mode:
+        nx2 = x2 + dx
+    if "n" in mode:
+        ny1 = y1 + dy
+    if "s" in mode:
+        ny2 = y2 + dy
+    return nx1, ny1, nx2, ny2
+
+
+def draw_box_handles(img: np.ndarray, box_disp: BBox, color: Tuple[int, int, int], size: int = HANDLE_SIZE_PX) -> None:
+    for hx, hy in box_handles(box_disp).values():
+        cv2.rectangle(img, (hx - size, hy - size), (hx + size, hy + size), color, -1)
 
 class FrameDecodeError(RuntimeError):
     """Raised when a requested video frame cannot be decoded."""
@@ -359,8 +426,10 @@ class BBoxLabeler:
         self.current_idx = 0
 
         self.dragging = False
+        self.drag_mode: Optional[str] = None
         self.drag_start: Optional[Tuple[int, int]] = None
         self.drag_current: Optional[Tuple[int, int]] = None
+        self.drag_base_box: Optional[BBox] = None
         self.last_save_count = 0
 
         self.win = "MonkeyBBox"
@@ -440,9 +509,23 @@ class BBoxLabeler:
         if event == cv2.EVENT_LBUTTONDOWN:
             if not self._is_in_image_area(mx, my):
                 return
+            click_pt = self._display_to_original(mx, my)
+            ann = self._current_ann()
+            if ann.bbox is not None:
+                hit_radius = int(round(HANDLE_HIT_RADIUS_PX / self.display_scale))
+                mode = hit_test_box_handle(click_pt, ann.bbox, hit_radius)
+                if mode is not None:
+                    self.dragging = True
+                    self.drag_mode = mode
+                    self.drag_start = click_pt
+                    self.drag_current = click_pt
+                    self.drag_base_box = ann.bbox
+                    return
             self.dragging = True
-            self.drag_start = self._display_to_original(mx, my)
+            self.drag_mode = "draw"
+            self.drag_start = click_pt
             self.drag_current = self.drag_start
+            self.drag_base_box = None
 
         elif event == cv2.EVENT_MOUSEMOVE and self.dragging:
             self.drag_current = self._display_to_original(mx, my)
@@ -452,9 +535,15 @@ class BBoxLabeler:
             if self.drag_start is None:
                 return
             end = self._display_to_original(mx, my)
-            box = clamp_box((*self.drag_start, *end), self.video.width, self.video.height)
+            if self.drag_mode == "draw" or self.drag_base_box is None:
+                raw_box = (*self.drag_start, *end)
+            else:
+                raw_box = apply_box_edit(self.drag_base_box, self.drag_mode, self.drag_start, end)
+            box = clamp_box(raw_box, self.video.width, self.video.height)
             self.drag_start = None
             self.drag_current = None
+            self.drag_mode = None
+            self.drag_base_box = None
             if box is None:
                 print("Ignored tiny box. Draw a larger rectangle.")
                 return
@@ -507,15 +596,21 @@ class BBoxLabeler:
         elif ann.bbox is not None:
             x1, y1, x2, y2 = self._box_to_display(ann.bbox)
             cv2.rectangle(disp, (x1, y1), (x2, y2), C_GREEN, 3)
+            draw_box_handles(disp, (x1, y1, x2, y2), C_GREEN)
             cv2.putText(disp, "monkey", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
         elif ann.visible is True:
             cv2.putText(disp, "VISIBLE - DRAW BOX", (30, y_image_bottom - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
 
         if self.dragging and self.drag_start is not None and self.drag_current is not None:
-            preview = clamp_box((*self.drag_start, *self.drag_current), self.video.width, self.video.height)
+            if self.drag_mode == "draw" or self.drag_base_box is None:
+                raw_preview = (*self.drag_start, *self.drag_current)
+            else:
+                raw_preview = apply_box_edit(self.drag_base_box, self.drag_mode, self.drag_start, self.drag_current)
+            preview = clamp_box(raw_preview, self.video.width, self.video.height)
             if preview is not None:
                 x1, y1, x2, y2 = self._box_to_display(preview)
                 cv2.rectangle(disp, (x1, y1), (x2, y2), C_BLUE, 2)
+                draw_box_handles(disp, (x1, y1, x2, y2), C_BLUE)
 
         n_box, n_pending, n_no, n_any = self._annotated_counts()
         cv2.rectangle(disp, (0, 0), (dw, self.header_bar_h), C_BLACK, -1)
@@ -609,6 +704,394 @@ class BBoxLabeler:
         return df
 
 
+class BBoxFrameLabeler:
+    def __init__(
+        self,
+        frames_dir: Path,
+        output_csv: Path,
+        sample_every: int = DEFAULT_SAMPLE_EVERY,
+        display_scale: float = DEFAULT_SCALE,
+        fps: float = DEFAULT_FPS,
+        auto_advance: bool = False,
+        save_images: Optional[Path] = None,
+        autosave_every: int = DEFAULT_AUTOSAVE_EVERY,
+    ):
+        self.frames_dir = Path(frames_dir)
+        self.output_csv = Path(output_csv)
+        self.sample_every = int(sample_every)
+        self.display_scale = float(display_scale)
+        self.fps = float(fps)
+        self.auto_advance = bool(auto_advance)
+        self.save_images = Path(save_images) if save_images else None
+        self.autosave_every = int(autosave_every)
+        self.changes_since_save = 0
+
+        if not self.frames_dir.exists():
+            raise FileNotFoundError(f"Frames directory does not exist: {self.frames_dir}")
+
+        all_paths = sorted(
+            [p for p in self.frames_dir.iterdir() if p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png"}]
+        )
+        if not all_paths:
+            raise RuntimeError(f"No image frames found in: {self.frames_dir}")
+
+        entries = []
+        for i, p in enumerate(all_paths):
+            frame_num = parse_frame_index_from_image(p)
+            if frame_num is None:
+                frame_num = i
+            entries.append((int(frame_num), p))
+        entries.sort(key=lambda x: x[0])
+        self.frame_entries = entries[::self.sample_every]
+        if not self.frame_entries:
+            raise RuntimeError("No frames selected. Check --sample-every.")
+
+        self.frame_map: Dict[int, Path] = {fn: p for fn, p in self.frame_entries}
+        first_frame = cv2.imread(str(self.frame_entries[0][1]))
+        if first_frame is None:
+            raise RuntimeError(f"Could not read frame: {self.frame_entries[0][1]}")
+        self.height, self.width = first_frame.shape[:2]
+
+        self.annotations: Dict[int, FrameAnnotation] = {}
+        self.current_idx = 0
+        self.dragging = False
+        self.drag_mode: Optional[str] = None
+        self.drag_start: Optional[Tuple[int, int]] = None
+        self.drag_current: Optional[Tuple[int, int]] = None
+        self.drag_base_box: Optional[BBox] = None
+
+        self.win = "MonkeyBBoxFrames"
+        self.win_title = f"Monkey bbox - {self.frames_dir.name}"
+        self.header_bar_h = HEADER_BAR_H
+        self.footer_bar_h = FOOTER_BAR_H
+
+        if self.output_csv.exists():
+            self._load_existing()
+
+        print(f"\nFrames dir: {self.frames_dir}")
+        print(f"Resolution: {self.width} x {self.height}")
+        print(f"Sampling every {self.sample_every} entries -> {len(self.frame_entries)} frames to review")
+        print(f"Output CSV: {self.output_csv}")
+        print(f"Auto-advance after drawing: {self.auto_advance}")
+        if self.save_images:
+            print(f"Positive-frame JPEG export: {self.save_images}")
+        if self.autosave_every > 0:
+            print(f"Autosave: every {self.autosave_every} annotation changes")
+
+    def _load_existing(self):
+        df = pd.read_csv(self.output_csv)
+        loaded = 0
+        for _, row in df.iterrows():
+            fn = int(row["video_frame"])
+            visible = parse_visible(row.get("monkey_visible"))
+            box = None
+            if visible:
+                vals = [row.get(c) for c in ("bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2")]
+                if all(pd.notna(v) for v in vals):
+                    raw_box = tuple(int(round(float(v))) for v in vals)  # type: ignore[arg-type]
+                    box = clamp_box(raw_box, self.width, self.height)
+            self.annotations[fn] = FrameAnnotation(visible=visible, bbox=box)
+            loaded += 1
+        print(f"Resumed: loaded {loaded} existing rows from {self.output_csv}")
+
+    def _current_entry(self) -> Tuple[int, Path]:
+        return self.frame_entries[self.current_idx]
+
+    def _current_frame_num(self) -> int:
+        return self._current_entry()[0]
+
+    def _current_frame_path(self) -> Path:
+        return self._current_entry()[1]
+
+    def _current_ann(self) -> FrameAnnotation:
+        fn = self._current_frame_num()
+        if fn not in self.annotations:
+            self.annotations[fn] = FrameAnnotation()
+        return self.annotations[fn]
+
+    def _display_to_original(self, x: int, y: int) -> Tuple[int, int]:
+        y = y - self.header_bar_h
+        ox = int(round(x / self.display_scale))
+        oy = int(round(y / self.display_scale))
+        ox = max(0, min(self.width - 1, ox))
+        oy = max(0, min(self.height - 1, oy))
+        return ox, oy
+
+    def _is_in_image_area(self, x: int, y: int) -> bool:
+        disp_w = int(self.width * self.display_scale)
+        disp_h = int(self.height * self.display_scale)
+        return 0 <= x < disp_w and self.header_bar_h <= y < (self.header_bar_h + disp_h)
+
+    def _box_to_display(self, box: BBox) -> BBox:
+        x1, y1, x2, y2 = box
+        return (
+            int(round(x1 * self.display_scale)),
+            int(round(y1 * self.display_scale)) + self.header_bar_h,
+            int(round(x2 * self.display_scale)),
+            int(round(y2 * self.display_scale)) + self.header_bar_h,
+        )
+
+    def _mouse_cb(self, event, mx, my, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            if not self._is_in_image_area(mx, my):
+                return
+            click_pt = self._display_to_original(mx, my)
+            ann = self._current_ann()
+            if ann.bbox is not None:
+                hit_radius = int(round(HANDLE_HIT_RADIUS_PX / self.display_scale))
+                mode = hit_test_box_handle(click_pt, ann.bbox, hit_radius)
+                if mode is not None:
+                    self.dragging = True
+                    self.drag_mode = mode
+                    self.drag_start = click_pt
+                    self.drag_current = click_pt
+                    self.drag_base_box = ann.bbox
+                    return
+            self.dragging = True
+            self.drag_mode = "draw"
+            self.drag_start = click_pt
+            self.drag_current = self.drag_start
+            self.drag_base_box = None
+
+        elif event == cv2.EVENT_MOUSEMOVE and self.dragging:
+            self.drag_current = self._display_to_original(mx, my)
+
+        elif event == cv2.EVENT_LBUTTONUP and self.dragging:
+            self.dragging = False
+            if self.drag_start is None:
+                return
+            end = self._display_to_original(mx, my)
+            if self.drag_mode == "draw" or self.drag_base_box is None:
+                raw_box = (*self.drag_start, *end)
+            else:
+                raw_box = apply_box_edit(self.drag_base_box, self.drag_mode, self.drag_start, end)
+            box = clamp_box(raw_box, self.width, self.height)
+            self.drag_start = None
+            self.drag_current = None
+            self.drag_mode = None
+            self.drag_base_box = None
+            if box is None:
+                print("Ignored tiny box. Draw a larger rectangle.")
+                return
+            ann = self._current_ann()
+            ann.visible = True
+            ann.bbox = box
+            self._note_annotation_change()
+            if self.auto_advance:
+                self._next_frame()
+
+    def _note_annotation_change(self) -> None:
+        self.changes_since_save += 1
+        if self.autosave_every > 0 and self.changes_since_save >= self.autosave_every:
+            self.save()
+            self.changes_since_save = 0
+
+    def _next_frame(self):
+        self.current_idx = min(len(self.frame_entries) - 1, self.current_idx + 1)
+
+    def _prev_frame(self):
+        self.current_idx = max(0, self.current_idx - 1)
+
+    def _annotated_counts(self) -> Tuple[int, int, int, int]:
+        n_box = sum(1 for a in self.annotations.values() if a.visible is True and a.bbox is not None)
+        n_visible_pending = sum(1 for a in self.annotations.values() if a.visible is True and a.bbox is None)
+        n_no = sum(1 for a in self.annotations.values() if a.visible is False)
+        n_any = sum(1 for a in self.annotations.values() if a.visible is not None)
+        return n_box, n_visible_pending, n_no, n_any
+
+    def _render(self) -> np.ndarray:
+        fn = self._current_frame_num()
+        frame_path = self._current_frame_path()
+        frame = cv2.imread(str(frame_path))
+        if frame is None:
+            raise RuntimeError(f"Could not read frame: {frame_path}")
+        frame_disp = cv2.resize(
+            frame,
+            (int(self.width * self.display_scale), int(self.height * self.display_scale)),
+            interpolation=cv2.INTER_AREA,
+        )
+        dh, dw = frame_disp.shape[:2]
+        ch = dh + self.header_bar_h + self.footer_bar_h
+        disp = np.full((ch, dw, 3), 20, dtype=np.uint8)
+        disp[self.header_bar_h:self.header_bar_h + dh, 0:dw] = frame_disp
+        y_image_top = self.header_bar_h
+        y_image_bottom = self.header_bar_h + dh
+
+        ann = self.annotations.get(fn, FrameAnnotation())
+
+        if ann.visible is False:
+            cv2.drawMarker(disp, (dw // 2, y_image_top + dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
+            cv2.putText(disp, "NO MONKEY", (dw // 2 - 110, y_image_top + dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, C_RED, 3)
+        elif ann.bbox is not None:
+            x1, y1, x2, y2 = self._box_to_display(ann.bbox)
+            cv2.rectangle(disp, (x1, y1), (x2, y2), C_GREEN, 3)
+            draw_box_handles(disp, (x1, y1, x2, y2), C_GREEN)
+            cv2.putText(disp, "monkey", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
+        elif ann.visible is True:
+            cv2.putText(disp, "VISIBLE - DRAW BOX", (30, y_image_bottom - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
+
+        if self.dragging and self.drag_start is not None and self.drag_current is not None:
+            if self.drag_mode == "draw" or self.drag_base_box is None:
+                raw_preview = (*self.drag_start, *self.drag_current)
+            else:
+                raw_preview = apply_box_edit(self.drag_base_box, self.drag_mode, self.drag_start, self.drag_current)
+            preview = clamp_box(raw_preview, self.width, self.height)
+            if preview is not None:
+                x1, y1, x2, y2 = self._box_to_display(preview)
+                cv2.rectangle(disp, (x1, y1), (x2, y2), C_BLUE, 2)
+                draw_box_handles(disp, (x1, y1, x2, y2), C_BLUE)
+
+        n_box, n_pending, n_no, n_any = self._annotated_counts()
+        cv2.rectangle(disp, (0, 0), (dw, self.header_bar_h), C_BLACK, -1)
+        header = (
+            f"sample {self.current_idx + 1}/{len(self.frame_entries)} | "
+            f"video frame #{fn} ({fn / self.fps:.1f}s) | "
+            f"boxes {n_box} | pending {n_pending} | no-monkey {n_no} | reviewed {n_any}"
+        )
+        cv2.putText(disp, header, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.68, C_YELLOW, 2, cv2.LINE_AA)
+
+        cv2.rectangle(disp, (0, y_image_bottom), (dw, ch), C_BLACK, -1)
+        footer = "Drag/handles=box edit  Enter/Space=accept+next  A=auto  M=no-monkey  N/P=next/prev  U=undo  S=save  Q=save+quit"
+        if self.auto_advance:
+            footer = "AUTO ON  " + footer
+        cv2.putText(disp, footer, (10, ch - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_GRAY, 1, cv2.LINE_AA)
+
+        y0 = y_image_bottom + 4
+        cv2.rectangle(disp, (0, y0), (dw, y0 + 4), (60, 60, 60), -1)
+        for i, (frame_num, _) in enumerate(self.frame_entries):
+            a = self.annotations.get(frame_num)
+            if a is None or a.visible is None:
+                continue
+            x = int(i / max(1, len(self.frame_entries) - 1) * (dw - 1))
+            if a.visible is False:
+                color = C_RED
+            elif a.bbox is not None:
+                color = C_GREEN
+            else:
+                color = C_YELLOW
+            cv2.line(disp, (x, y0), (x, y0 + 4), color, 2)
+
+        return disp
+
+    def _save_images_for_positive_boxes(self):
+        if self.save_images is None:
+            return
+        self.save_images.mkdir(parents=True, exist_ok=True)
+        written = 0
+        for fn, ann in self.annotations.items():
+            if ann.visible is True and ann.bbox is not None:
+                frame_path = self.frame_map.get(fn)
+                if frame_path is None:
+                    continue
+                out_name = f"{self.frames_dir.stem}_frame{fn:08d}.jpg"
+                out_path = self.save_images / out_name
+                if not out_path.exists():
+                    frame = cv2.imread(str(frame_path))
+                    if frame is not None:
+                        cv2.imwrite(str(out_path), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                        written += 1
+        if written:
+            print(f"Saved {written} positive-frame JPEGs to {self.save_images}")
+
+    def save(self) -> pd.DataFrame:
+        records = []
+        video_timestamp = parse_video_timestamp(self.frames_dir)
+        video_file = self.frames_dir.name
+        for fn in sorted(self.annotations):
+            ann = self.annotations[fn]
+            if ann.visible is None:
+                continue
+            if ann.visible is True and ann.bbox is not None:
+                x1, y1, x2, y2 = ann.bbox
+                bw = x2 - x1
+                bh = y2 - y1
+            else:
+                x1 = y1 = x2 = y2 = bw = bh = np.nan
+
+            records.append(
+                {
+                    "video_file": video_file,
+                    "video_timestamp": video_timestamp,
+                    "video_frame": int(fn),
+                    "time_sec": float(fn / self.fps),
+                    "monkey_visible": bool(ann.visible),
+                    "bbox_x1": x1,
+                    "bbox_y1": y1,
+                    "bbox_x2": x2,
+                    "bbox_y2": y2,
+                    "bbox_width": bw,
+                    "bbox_height": bh,
+                    "image_width": self.width,
+                    "image_height": self.height,
+                }
+            )
+
+        df = pd.DataFrame(records)
+        self.output_csv.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(self.output_csv, index=False)
+        self._save_images_for_positive_boxes()
+        self.changes_since_save = 0
+        n_box, n_pending, n_no, _ = self._annotated_counts()
+        print(f"Saved {len(df)} reviewed frames -> {self.output_csv}")
+        print(f"  boxes: {n_box}   visible-without-box: {n_pending}   no-monkey: {n_no}")
+        return df
+
+    def run(self):
+        print(f"\nOpening window: {self.win_title}")
+        try:
+            try:
+                cv2.startWindowThread()
+            except Exception:
+                pass
+            cv2.namedWindow(self.win, cv2.WINDOW_NORMAL)
+            try:
+                cv2.setWindowTitle(self.win, self.win_title)
+            except Exception:
+                pass
+            cv2.imshow(self.win, self._render())
+            cv2.waitKey(1)
+            cv2.setMouseCallback(self.win, self._mouse_cb)
+        except cv2.error as exc:
+            print("\nERROR: Failed to create OpenCV GUI window.")
+            print(f"Details: {exc}")
+            print("Check DISPLAY, X11 forwarding, or your OpenCV GUI backend.")
+            raise SystemExit(1)
+
+        print("\nWindow opened. Draw a box around the monkey. Press Q or ESC to save and quit.\n")
+        while True:
+            cv2.imshow(self.win, self._render())
+            key = cv2.waitKey(30) & 0xFF
+
+            if key in (ord("q"), 27):
+                break
+            if key in (ord("s"),):
+                self.save()
+            elif key in (ord("a"),):
+                self.auto_advance = not self.auto_advance
+                print(f"Auto-advance: {self.auto_advance}")
+            elif key in (ord("n"), 83):
+                self._next_frame()
+            elif key in (ord("p"), 81):
+                self._prev_frame()
+            elif key in (ord("u"),):
+                ann = self._current_ann()
+                ann.visible = None
+                ann.bbox = None
+                self._note_annotation_change()
+            elif key in (ord("m"),):
+                ann = self._current_ann()
+                ann.visible = False
+                ann.bbox = None
+                self._note_annotation_change()
+                self._next_frame()
+            elif key in (13, 10, 32):
+                self._next_frame()
+
+        cv2.destroyAllWindows()
+        df = self.save()
+        return df
+
+
 class BBoxValidateLabeler:
     def __init__(
         self,
@@ -643,8 +1126,10 @@ class BBoxValidateLabeler:
         self.frame_map = self._build_frame_map()
         self.current_idx = 0
         self.dragging = False
+        self.drag_mode: Optional[str] = None
         self.drag_start: Optional[Tuple[int, int]] = None
         self.drag_current: Optional[Tuple[int, int]] = None
+        self.drag_base_box: Optional[BBox] = None
 
         first_frame = cv2.imread(str(self.frame_paths[0]))
         if first_frame is None:
@@ -764,9 +1249,23 @@ class BBoxValidateLabeler:
         if event == cv2.EVENT_LBUTTONDOWN:
             if not self._is_in_image_area(mx, my):
                 return
+            click_pt = self._display_to_original(mx, my)
+            pred_box = self._current_pred_box()
+            if pred_box is not None:
+                hit_radius = int(round(HANDLE_HIT_RADIUS_PX / self.display_scale))
+                mode = hit_test_box_handle(click_pt, pred_box, hit_radius)
+                if mode is not None:
+                    self.dragging = True
+                    self.drag_mode = mode
+                    self.drag_start = click_pt
+                    self.drag_current = click_pt
+                    self.drag_base_box = pred_box
+                    return
             self.dragging = True
-            self.drag_start = self._display_to_original(mx, my)
+            self.drag_mode = "draw"
+            self.drag_start = click_pt
             self.drag_current = self.drag_start
+            self.drag_base_box = None
         elif event == cv2.EVENT_MOUSEMOVE and self.dragging:
             self.drag_current = self._display_to_original(mx, my)
         elif event == cv2.EVENT_LBUTTONUP and self.dragging:
@@ -774,9 +1273,15 @@ class BBoxValidateLabeler:
             if self.drag_start is None:
                 return
             end = self._display_to_original(mx, my)
-            box = clamp_box((*self.drag_start, *end), self.width, self.height)
+            if self.drag_mode == "draw" or self.drag_base_box is None:
+                raw_box = (*self.drag_start, *end)
+            else:
+                raw_box = apply_box_edit(self.drag_base_box, self.drag_mode, self.drag_start, end)
+            box = clamp_box(raw_box, self.width, self.height)
             self.drag_start = None
             self.drag_current = None
+            self.drag_mode = None
+            self.drag_base_box = None
             if box is None:
                 print("Ignored tiny box. Draw a larger rectangle.")
                 return
@@ -828,15 +1333,21 @@ class BBoxValidateLabeler:
         elif pred_box is not None:
             x1, y1, x2, y2 = self._box_to_display(pred_box)
             cv2.rectangle(disp, (x1, y1), (x2, y2), C_GREEN, 3)
+            draw_box_handles(disp, (x1, y1, x2, y2), C_GREEN)
             cv2.putText(disp, "PRED", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
         else:
             cv2.putText(disp, "NO PREDICTION", (20, y_image_bottom - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
 
         if self.dragging and self.drag_start is not None and self.drag_current is not None:
-            preview = clamp_box((*self.drag_start, *self.drag_current), self.width, self.height)
+            if self.drag_mode == "draw" or self.drag_base_box is None:
+                raw_preview = (*self.drag_start, *self.drag_current)
+            else:
+                raw_preview = apply_box_edit(self.drag_base_box, self.drag_mode, self.drag_start, self.drag_current)
+            preview = clamp_box(raw_preview, self.width, self.height)
             if preview is not None:
                 x1, y1, x2, y2 = self._box_to_display(preview)
                 cv2.rectangle(disp, (x1, y1), (x2, y2), C_BLUE, 2)
+                draw_box_handles(disp, (x1, y1, x2, y2), C_BLUE)
 
         cv2.rectangle(disp, (0, 0), (dw, self.header_bar_h), C_BLACK, -1)
         header = (
@@ -917,7 +1428,7 @@ def main():
     parser.add_argument("--mode", choices=["annotate", "validate"], default="annotate", help="annotate: create bbox labels, validate: review predictions on extracted frames")
     parser.add_argument("--video", "-v", required=False, help="Video file path for annotate mode")
     parser.add_argument("--output", "-o", default=None, help="Output CSV path for annotate mode")
-    parser.add_argument("--frames-dir", default=None, help="Directory containing extracted JPG/PNG frames for validate mode")
+    parser.add_argument("--frames-dir", default=None, help="Directory containing extracted JPG/PNG frames for validate mode or annotate mode")
     parser.add_argument("--predictions-csv", default=None, help="RT-DETR predictions CSV for validate mode")
     parser.add_argument("--validated-output", default=None, help="Output CSV path for validate mode (defaults to predictions CSV) ")
     parser.add_argument("--sample-every", "-n", type=int, default=DEFAULT_SAMPLE_EVERY, help="Label every Nth frame in annotate mode")
@@ -933,29 +1444,44 @@ def main():
         sys.exit("ERROR: --scale must be positive")
 
     if args.mode == "annotate":
-        if not args.video:
-            sys.exit("ERROR: --video is required in annotate mode")
+        if bool(args.video) == bool(args.frames_dir):
+            sys.exit("ERROR: annotate mode requires exactly one source: --video or --frames-dir")
         if args.sample_every <= 0:
             sys.exit("ERROR: --sample-every must be positive")
 
-        video = Path(args.video).expanduser().resolve()
-        if not video.exists():
-            sys.exit(f"ERROR: Video file does not exist: {video}")
-
-        output_csv = (Path(args.output).expanduser().resolve() if args.output
-                      else OUTPUT_BASE / f"bbox_{video.stem}.csv")
-
-        labeler = BBoxLabeler(
-            video_path=video,
-            output_csv=output_csv,
-            sample_every=args.sample_every,
-            display_scale=args.scale,
-            fps=args.fps,
-            auto_advance=args.auto_advance,
-            save_images=Path(args.save_images) if args.save_images else None,
-            cache_size=args.cache_size,
-            autosave_every=args.autosave_every,
-        )
+        if args.video:
+            video = Path(args.video).expanduser().resolve()
+            if not video.exists():
+                sys.exit(f"ERROR: Video file does not exist: {video}")
+            output_csv = (Path(args.output).expanduser().resolve() if args.output
+                          else OUTPUT_BASE / f"bbox_{video.stem}.csv")
+            labeler = BBoxLabeler(
+                video_path=video,
+                output_csv=output_csv,
+                sample_every=args.sample_every,
+                display_scale=args.scale,
+                fps=args.fps,
+                auto_advance=args.auto_advance,
+                save_images=Path(args.save_images) if args.save_images else None,
+                cache_size=args.cache_size,
+                autosave_every=args.autosave_every,
+            )
+        else:
+            frames_dir = Path(args.frames_dir).expanduser().resolve()
+            if not frames_dir.exists():
+                sys.exit(f"ERROR: Frames directory does not exist: {frames_dir}")
+            output_csv = (Path(args.output).expanduser().resolve() if args.output
+                          else OUTPUT_BASE / f"bbox_{frames_dir.stem}.csv")
+            labeler = BBoxFrameLabeler(
+                frames_dir=frames_dir,
+                output_csv=output_csv,
+                sample_every=args.sample_every,
+                display_scale=args.scale,
+                fps=args.fps,
+                auto_advance=args.auto_advance,
+                save_images=Path(args.save_images) if args.save_images else None,
+                autosave_every=args.autosave_every,
+            )
         labeler.run()
         return
 
