@@ -42,12 +42,13 @@ Controls:
     Left drag       draw new monkey bounding box
     Drag handle     resize existing box (corners + edge midpoints)
     Drag in box     move existing box
+    H               hide/show box overlays
     Enter / Space   accept current box and advance
     A               toggle auto-advance after drawing box
     M               mark frame as no monkey visible and advance
     N / Right       next frame
     P / Left        previous frame
-    U               undo annotation on current frame
+    U               mark current frame as no detection (keep row)
     S               save without quitting
     Q / ESC         save and quit
 
@@ -90,8 +91,8 @@ DEFAULT_SCALE = 0.4
 DEFAULT_CACHE_SIZE = 25
 DEFAULT_AUTOSAVE_EVERY = 25
 MIN_BOX_SIZE = 5
-HANDLE_SIZE_PX = 8
-HANDLE_HIT_RADIUS_PX = 14
+HANDLE_SIZE_PX = 5
+HANDLE_HIT_RADIUS_PX = 10
 HEADER_BAR_H = 56
 FOOTER_BAR_H = 52
 FRAME_INDEX_RE = re.compile(r"_f(\d+)$")
@@ -430,6 +431,7 @@ class BBoxLabeler:
         self.drag_start: Optional[Tuple[int, int]] = None
         self.drag_current: Optional[Tuple[int, int]] = None
         self.drag_base_box: Optional[BBox] = None
+        self.show_overlays = True
         self.last_save_count = 0
 
         self.win = "MonkeyBBox"
@@ -590,18 +592,19 @@ class BBoxLabeler:
 
         ann = self.annotations.get(fn, FrameAnnotation())
 
-        if ann.visible is False:
-            cv2.drawMarker(disp, (dw // 2, y_image_top + dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
-            cv2.putText(disp, "NO MONKEY", (dw // 2 - 110, y_image_top + dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, C_RED, 3)
-        elif ann.bbox is not None:
-            x1, y1, x2, y2 = self._box_to_display(ann.bbox)
-            cv2.rectangle(disp, (x1, y1), (x2, y2), C_GREEN, 3)
-            draw_box_handles(disp, (x1, y1, x2, y2), C_GREEN)
-            cv2.putText(disp, "monkey", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
-        elif ann.visible is True:
-            cv2.putText(disp, "VISIBLE - DRAW BOX", (30, y_image_bottom - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
+        if self.show_overlays:
+            if ann.visible is False:
+                cv2.drawMarker(disp, (dw // 2, y_image_top + dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
+                cv2.putText(disp, "NO MONKEY", (dw // 2 - 110, y_image_top + dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, C_RED, 3)
+            elif ann.bbox is not None:
+                x1, y1, x2, y2 = self._box_to_display(ann.bbox)
+                cv2.rectangle(disp, (x1, y1), (x2, y2), C_GREEN, 3)
+                draw_box_handles(disp, (x1, y1, x2, y2), C_GREEN)
+                cv2.putText(disp, "monkey", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
+            elif ann.visible is True:
+                cv2.putText(disp, "VISIBLE - DRAW BOX", (30, y_image_bottom - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
 
-        if self.dragging and self.drag_start is not None and self.drag_current is not None:
+        if self.show_overlays and self.dragging and self.drag_start is not None and self.drag_current is not None:
             if self.drag_mode == "draw" or self.drag_base_box is None:
                 raw_preview = (*self.drag_start, *self.drag_current)
             else:
@@ -617,12 +620,12 @@ class BBoxLabeler:
         header = (
             f"sample {self.current_idx + 1}/{len(self.frame_nums)} | "
             f"video frame #{fn} ({fn / self.fps:.1f}s) | "
-            f"boxes {n_box} | pending {n_pending} | no-monkey {n_no} | reviewed {n_any}"
+            f"boxes {n_box} | pending {n_pending} | no-monkey {n_no} | reviewed {n_any} | overlays {'ON' if self.show_overlays else 'OFF'}"
         )
         cv2.putText(disp, header, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.68, C_YELLOW, 2, cv2.LINE_AA)
 
         cv2.rectangle(disp, (0, y_image_bottom), (dw, ch), C_BLACK, -1)
-        footer = "Drag=box  Enter/Space=accept+next  A=auto  M=no-monkey  N/P=next/prev  U=undo  S=save  Q=save+quit"
+        footer = "Drag=box  H=overlay on/off  Enter/Space=accept+next  A=auto  M=no-monkey  N/P=next/prev  U=undo  S=save  Q=save+quit"
         if self.auto_advance:
             footer = "AUTO ON  " + footer
         cv2.putText(disp, footer, (10, ch - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_GRAY, 1, cv2.LINE_AA)
@@ -703,6 +706,64 @@ class BBoxLabeler:
         print(f"  boxes: {n_box}   visible-without-box: {n_pending}   no-monkey: {n_no}")
         return df
 
+    def run(self):
+        print(f"\nOpening window: {self.win_title}")
+        try:
+            try:
+                cv2.startWindowThread()
+            except Exception:
+                pass
+            cv2.namedWindow(self.win, cv2.WINDOW_NORMAL)
+            try:
+                cv2.setWindowTitle(self.win, self.win_title)
+            except Exception:
+                pass
+            cv2.imshow(self.win, self._render())
+            cv2.waitKey(1)
+            cv2.setMouseCallback(self.win, self._mouse_cb)
+        except cv2.error as exc:
+            print("\nERROR: Failed to create OpenCV GUI window.")
+            print(f"Details: {exc}")
+            print("Check DISPLAY, X11 forwarding, or your OpenCV GUI backend.")
+            raise SystemExit(1)
+
+        print("\nWindow opened. Draw a box around the monkey. Press Q or ESC to save and quit.\n")
+        while True:
+            cv2.imshow(self.win, self._render())
+            key = cv2.waitKey(30) & 0xFF
+
+            if key in (ord("q"), 27):
+                break
+            if key in (ord("s"),):
+                self.save()
+            elif key in (ord("a"),):
+                self.auto_advance = not self.auto_advance
+                print(f"Auto-advance: {self.auto_advance}")
+            elif key in (ord("h"),):
+                self.show_overlays = not self.show_overlays
+                print(f"Overlays: {'ON' if self.show_overlays else 'OFF'}")
+            elif key in (ord("n"), 83):
+                self._next_frame()
+            elif key in (ord("p"), 81):
+                self._prev_frame()
+            elif key in (ord("u"),):
+                ann = self._current_ann()
+                ann.visible = None
+                ann.bbox = None
+                self._note_annotation_change()
+            elif key in (ord("m"),):
+                ann = self._current_ann()
+                ann.visible = False
+                ann.bbox = None
+                self._note_annotation_change()
+                self._next_frame()
+            elif key in (13, 10, 32):
+                self._next_frame()
+
+        cv2.destroyAllWindows()
+        df = self.save()
+        return df
+
 
 class BBoxFrameLabeler:
     def __init__(
@@ -759,6 +820,7 @@ class BBoxFrameLabeler:
         self.drag_start: Optional[Tuple[int, int]] = None
         self.drag_current: Optional[Tuple[int, int]] = None
         self.drag_base_box: Optional[BBox] = None
+        self.show_overlays = True
 
         self.win = "MonkeyBBoxFrames"
         self.win_title = f"Monkey bbox - {self.frames_dir.name}"
@@ -919,18 +981,19 @@ class BBoxFrameLabeler:
 
         ann = self.annotations.get(fn, FrameAnnotation())
 
-        if ann.visible is False:
-            cv2.drawMarker(disp, (dw // 2, y_image_top + dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
-            cv2.putText(disp, "NO MONKEY", (dw // 2 - 110, y_image_top + dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, C_RED, 3)
-        elif ann.bbox is not None:
-            x1, y1, x2, y2 = self._box_to_display(ann.bbox)
-            cv2.rectangle(disp, (x1, y1), (x2, y2), C_GREEN, 3)
-            draw_box_handles(disp, (x1, y1, x2, y2), C_GREEN)
-            cv2.putText(disp, "monkey", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
-        elif ann.visible is True:
-            cv2.putText(disp, "VISIBLE - DRAW BOX", (30, y_image_bottom - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
+        if self.show_overlays:
+            if ann.visible is False:
+                cv2.drawMarker(disp, (dw // 2, y_image_top + dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
+                cv2.putText(disp, "NO MONKEY", (dw // 2 - 110, y_image_top + dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.2, C_RED, 3)
+            elif ann.bbox is not None:
+                x1, y1, x2, y2 = self._box_to_display(ann.bbox)
+                cv2.rectangle(disp, (x1, y1), (x2, y2), C_GREEN, 3)
+                draw_box_handles(disp, (x1, y1, x2, y2), C_GREEN)
+                cv2.putText(disp, "monkey", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
+            elif ann.visible is True:
+                cv2.putText(disp, "VISIBLE - DRAW BOX", (30, y_image_bottom - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
 
-        if self.dragging and self.drag_start is not None and self.drag_current is not None:
+        if self.show_overlays and self.dragging and self.drag_start is not None and self.drag_current is not None:
             if self.drag_mode == "draw" or self.drag_base_box is None:
                 raw_preview = (*self.drag_start, *self.drag_current)
             else:
@@ -946,12 +1009,12 @@ class BBoxFrameLabeler:
         header = (
             f"sample {self.current_idx + 1}/{len(self.frame_entries)} | "
             f"video frame #{fn} ({fn / self.fps:.1f}s) | "
-            f"boxes {n_box} | pending {n_pending} | no-monkey {n_no} | reviewed {n_any}"
+            f"boxes {n_box} | pending {n_pending} | no-monkey {n_no} | reviewed {n_any} | overlays {'ON' if self.show_overlays else 'OFF'}"
         )
         cv2.putText(disp, header, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.68, C_YELLOW, 2, cv2.LINE_AA)
 
         cv2.rectangle(disp, (0, y_image_bottom), (dw, ch), C_BLACK, -1)
-        footer = "Drag/handles=box edit  Enter/Space=accept+next  A=auto  M=no-monkey  N/P=next/prev  U=undo  S=save  Q=save+quit"
+        footer = "Drag/handles=box edit  H=overlay on/off  Enter/Space=accept+next  A=auto  M=no-monkey  N/P=next/prev  U=undo  S=save  Q=save+quit"
         if self.auto_advance:
             footer = "AUTO ON  " + footer
         cv2.putText(disp, footer, (10, ch - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_GRAY, 1, cv2.LINE_AA)
@@ -1069,6 +1132,9 @@ class BBoxFrameLabeler:
             elif key in (ord("a"),):
                 self.auto_advance = not self.auto_advance
                 print(f"Auto-advance: {self.auto_advance}")
+            elif key in (ord("h"),):
+                self.show_overlays = not self.show_overlays
+                print(f"Overlays: {'ON' if self.show_overlays else 'OFF'}")
             elif key in (ord("n"), 83):
                 self._next_frame()
             elif key in (ord("p"), 81):
@@ -1130,6 +1196,7 @@ class BBoxValidateLabeler:
         self.drag_start: Optional[Tuple[int, int]] = None
         self.drag_current: Optional[Tuple[int, int]] = None
         self.drag_base_box: Optional[BBox] = None
+        self.show_overlays = True
 
         first_frame = cv2.imread(str(self.frame_paths[0]))
         if first_frame is None:
@@ -1215,12 +1282,39 @@ class BBoxValidateLabeler:
             self.save()
             self.changes_since_save = 0
 
-    def _clear_current_pred_row(self) -> None:
+    def _mark_current_no_detection(self) -> None:
         frame_num = self._current_frame_num()
         row_idx = self.pred_df.index[self.pred_df["video_frame"] == frame_num]
+        bbox_cols = [c for c in self.pred_df.columns if c.startswith("bbox_")]
+
         if len(row_idx) == 0:
+            new_row = {col: np.nan for col in self.pred_df.columns}
+            if "video_frame" in new_row:
+                new_row["video_frame"] = frame_num
+            if "has_detection" in new_row:
+                new_row["has_detection"] = False
+            if "monkey_visible" in new_row:
+                new_row["monkey_visible"] = False
+            if "class_name" in new_row:
+                new_row["class_name"] = ""
+            self.pred_df = pd.concat([self.pred_df, pd.DataFrame([new_row])], ignore_index=True)
+            self._note_change()
             return
-        self.pred_df = self.pred_df.drop(index=row_idx).reset_index(drop=True)
+
+        idx = row_idx[0]
+        if "has_detection" in self.pred_df.columns:
+            self.pred_df.at[idx, "has_detection"] = False
+        if "monkey_visible" in self.pred_df.columns:
+            self.pred_df.at[idx, "monkey_visible"] = False
+        for col in bbox_cols:
+            self.pred_df.at[idx, col] = np.nan
+        if "confidence" in self.pred_df.columns:
+            self.pred_df.at[idx, "confidence"] = np.nan
+        if "class_id" in self.pred_df.columns:
+            self.pred_df.at[idx, "class_id"] = np.nan
+        if "class_name" in self.pred_df.columns:
+            self.pred_df.at[idx, "class_name"] = ""
+
         self._note_change()
 
     def _mark_current_no_monkey(self) -> None:
@@ -1327,18 +1421,19 @@ class BBoxValidateLabeler:
         pred_visible = self._current_pred_visible()
         pred_box = self._current_pred_box()
 
-        if pred_visible is False:
-            cv2.drawMarker(disp, (dw // 2, y_image_top + dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
-            cv2.putText(disp, "PRED: NO MONKEY", (20, y_image_top + dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, C_RED, 3)
-        elif pred_box is not None:
-            x1, y1, x2, y2 = self._box_to_display(pred_box)
-            cv2.rectangle(disp, (x1, y1), (x2, y2), C_GREEN, 3)
-            draw_box_handles(disp, (x1, y1, x2, y2), C_GREEN)
-            cv2.putText(disp, "PRED", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
-        else:
-            cv2.putText(disp, "NO PREDICTION", (20, y_image_bottom - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
+        if self.show_overlays:
+            if pred_visible is False:
+                cv2.drawMarker(disp, (dw // 2, y_image_top + dh // 2), C_RED, cv2.MARKER_TILTED_CROSS, 80, 4)
+                cv2.putText(disp, "PRED: NO MONKEY", (20, y_image_top + dh // 2 + 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, C_RED, 3)
+            elif pred_box is not None:
+                x1, y1, x2, y2 = self._box_to_display(pred_box)
+                cv2.rectangle(disp, (x1, y1), (x2, y2), C_GREEN, 3)
+                draw_box_handles(disp, (x1, y1, x2, y2), C_GREEN)
+                cv2.putText(disp, "PRED", (x1, max(25, y1 - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_GREEN, 2)
+            else:
+                cv2.putText(disp, "NO PREDICTION", (20, y_image_bottom - 65), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2)
 
-        if self.dragging and self.drag_start is not None and self.drag_current is not None:
+        if self.show_overlays and self.dragging and self.drag_start is not None and self.drag_current is not None:
             if self.drag_mode == "draw" or self.drag_base_box is None:
                 raw_preview = (*self.drag_start, *self.drag_current)
             else:
@@ -1353,12 +1448,12 @@ class BBoxValidateLabeler:
         header = (
             f"frame {self.current_idx + 1}/{len(self.frame_paths)} | "
             f"video frame #{frame_num} | "
-            f"pred_visible={pred_visible}"
+            f"pred_visible={pred_visible} | overlays {'ON' if self.show_overlays else 'OFF'}"
         )
         cv2.putText(disp, header, (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.68, C_YELLOW, 2, cv2.LINE_AA)
 
         cv2.rectangle(disp, (0, y_image_bottom), (dw, ch), C_BLACK, -1)
-        footer = "Drag=correct box  Enter/Space=next  N/P=next/prev  U=clear pred row  S=save  Q=save+quit"
+        footer = "Drag=correct box  H=overlay on/off  Enter/Space=next  N/P=next/prev  U=mark no detection  S=save  Q=save+quit"
         cv2.putText(disp, footer, (10, ch - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_GRAY, 1, cv2.LINE_AA)
         return disp
 
@@ -1402,12 +1497,15 @@ class BBoxValidateLabeler:
                 break
             if key in (ord("s"),):
                 self.save()
+            elif key in (ord("h"),):
+                self.show_overlays = not self.show_overlays
+                print(f"Overlays: {'ON' if self.show_overlays else 'OFF'}")
             elif key in (ord("n"), 83):
                 self._next_frame()
             elif key in (ord("p"), 81):
                 self._prev_frame()
             elif key in (ord("u"),):
-                self._clear_current_pred_row()
+                self._mark_current_no_detection()
             elif key in (ord("m"),):
                 self._mark_current_no_monkey()
                 self._next_frame()
