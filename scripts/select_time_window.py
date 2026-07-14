@@ -4,7 +4,7 @@ Interactive time window selector for OFT trajectory data.
 
 Shows a split view:
   - Top panel: fused 2D trajectory for the selected time window
-    - Bottom panel: velocity time series with a fixed-width movable selector
+    - Bottom panel: movement-bout timeline with a fixed-width movable selector
 
 Controls:
     - Drag the slider to move the center of the time window
@@ -154,9 +154,10 @@ def run(monkey_id: str, session_date: str):
     fig.canvas.manager.set_window_title(
         f"OFT Time Window Selector — {monkey_id} / {session_date}")
 
-    # Axes arrangement: arena | velocity + slider + start/duration + buttons
+    # Axes arrangement: arena | stacked bout histograms + slider + start/duration + buttons
     ax_arena  = fig.add_axes([0.04, 0.14, 0.40, 0.78])   # trajectory map
-    ax_vel    = fig.add_axes([0.50, 0.56, 0.47, 0.34])   # velocity time series
+    ax_bouts  = fig.add_axes([0.50, 0.70, 0.47, 0.20])   # movement bout count histogram
+    ax_speed  = fig.add_axes([0.50, 0.48, 0.47, 0.20])   # moving velocity histogram
     ax_slider = fig.add_axes([0.50, 0.41, 0.47, 0.05])   # center slider
     ax_start  = fig.add_axes([0.50, 0.31, 0.12, 0.055])  # start-sec box
     ax_dur    = fig.add_axes([0.64, 0.31, 0.12, 0.055])  # duration box
@@ -165,39 +166,77 @@ def run(monkey_id: str, session_date: str):
     ax_info   = fig.add_axes([0.50, 0.06, 0.47, 0.20])   # stats text
     ax_info.axis('off')
 
-    # ── Velocity overview (full session, dimmed) ───────────────────────────────
-    ds = traj.iloc[::10]   # downsample for speed
-    ax_vel.plot(ds['time_sec'] / 60, ds['velocity_cm_s'],
-                color='#bbbbbb', lw=0.6, zorder=1)
-    ax_vel.axhline(5, color='salmon', lw=1, ls='--', alpha=0.6, label='5 cm/s threshold')
+    movement_bouts = _detect_bouts(traj)
 
-    # Mark long timeline gaps as likely missing video periods.
+    # ── 1-minute histograms over the full session ─────────────────────────────
+    bin_sec = 60.0
+    bin_edges_sec = np.arange(t_min, t_max + bin_sec, bin_sec)
+    if len(bin_edges_sec) < 2:
+        bin_edges_sec = np.array([t_min, t_max + bin_sec])
+    bin_centers_min = (bin_edges_sec[:-1] + bin_edges_sec[1:]) / 120.0
+    bar_width_min = (bin_edges_sec[1] - bin_edges_sec[0]) / 60.0 * 0.9
+
+    # Bout count per minute: count bout starts that fall in each minute bin.
+    bout_counts, _ = np.histogram(movement_bouts['start_sec'].values if not movement_bouts.empty else [], bins=bin_edges_sec)
+
+    moving_mask = traj['velocity_cm_s'] > VELOCITY_THRESHOLD
+    moving_sub = traj.loc[moving_mask, ['time_sec', 'velocity_cm_s']].copy()
+    if moving_sub.empty:
+        moving_means = np.zeros(len(bin_centers_min), dtype=float)
+    else:
+        moving_sub['bin'] = pd.cut(moving_sub['time_sec'], bins=bin_edges_sec, right=False, include_lowest=True)
+        moving_means = (
+            moving_sub.groupby('bin', observed=False)['velocity_cm_s']
+            .mean()
+            .reindex(pd.IntervalIndex.from_breaks(bin_edges_sec, closed='left'), fill_value=np.nan)
+            .to_numpy()
+        )
+        moving_means = np.nan_to_num(moving_means, nan=0.0)
+
+    ax_bouts.bar(bin_centers_min, bout_counts, width=bar_width_min, color='seagreen', alpha=0.55, edgecolor='none')
+    ax_bouts.set_ylabel('Bout count', fontsize=9)
+    ax_bouts.set_title('Movement bouts and moving velocity (1-min bins)', fontsize=10)
+    ax_bouts.set_xlim(t_min / 60, t_max / 60)
+    ax_bouts.set_xticklabels([])
+    ax_bouts.grid(axis='y', alpha=0.2)
+
+    ax_speed.bar(bin_centers_min, moving_means, width=bar_width_min, color='steelblue', alpha=0.55, edgecolor='none')
+    ax_speed.axhline(VELOCITY_THRESHOLD, color='salmon', lw=1, ls='--', alpha=0.6, label='5 cm/s threshold')
+    ax_speed.set_xlabel('Time (min)', fontsize=9)
+    ax_speed.set_ylabel('Mean moving velocity\n(cm/s)', fontsize=9)
+    ax_speed.set_xlim(t_min / 60, t_max / 60)
+    ax_speed.grid(axis='y', alpha=0.2)
+
+    # Mark long timeline gaps as likely missing video periods on both histograms.
     missing_label_used = False
     for start_sec, end_sec in missing_spans_sec:
-        ax_vel.axvspan(
-            start_sec / 60,
-            end_sec / 60,
-            color='red',
-            alpha=0.18,
-            zorder=0,
-            label='missing video' if not missing_label_used else None,
-        )
+        for ax in (ax_bouts, ax_speed):
+            ax.axvspan(
+                start_sec / 60,
+                end_sec / 60,
+                color='red',
+                alpha=0.12,
+                zorder=0,
+                label='missing video' if not missing_label_used else None,
+            )
         missing_label_used = True
 
-    ax_vel.set_xlabel('Time (min)', fontsize=9)
-    ax_vel.set_ylabel('Velocity (cm/s)', fontsize=9)
-    ax_vel.set_title('Velocity — move fixed-width window with slider', fontsize=10)
-    ax_vel.set_xlim(t_min / 60, t_max / 60)
-    ax_vel.legend(fontsize=8)
+    ax_speed.legend(handles=[
+        mpatches.Patch(color='seagreen', alpha=0.55, label='movement bout count'),
+        mpatches.Patch(color='steelblue', alpha=0.55, label='mean moving velocity'),
+        mpatches.Patch(color='red', alpha=0.12, label='missing video'),
+    ], fontsize=8, loc='upper right')
 
-    # Highlighted window overlay on velocity plot
+    # Highlighted window overlay on the histograms
     default_duration_min = max(5.0, min(30.0, t_span / 60))
     default_center_min = (t_min / 60 + t_max / 60) / 2
 
-    win_patch = ax_vel.axvspan(default_center_min - default_duration_min / 2,
-                               default_center_min + default_duration_min / 2,
-                               color='steelblue', alpha=0.15, zorder=2)
-    vel_line, = ax_vel.plot([], [], color='steelblue', lw=0.8, zorder=3)
+    win_patch_bouts = ax_bouts.axvspan(default_center_min - default_duration_min / 2,
+                                       default_center_min + default_duration_min / 2,
+                                       color='steelblue', alpha=0.15, zorder=2)
+    win_patch_speed = ax_speed.axvspan(default_center_min - default_duration_min / 2,
+                                       default_center_min + default_duration_min / 2,
+                                       color='steelblue', alpha=0.15, zorder=2)
 
     # ── Slider ─────────────────────────────────────────────────────────────────
     slider = Slider(ax_slider, 'Center (min)',
@@ -263,11 +302,11 @@ def run(monkey_id: str, session_date: str):
         start_pt.set_data([sub['x_cm'].iloc[0]], [sub['y_cm'].iloc[0]])
         end_pt.set_data([sub['x_cm'].iloc[-1]], [sub['y_cm'].iloc[-1]])
 
-        # Velocity highlight
-        ds_sub = sub.iloc[::10]
-        vel_line.set_data(ds_sub['time_sec'] / 60, ds_sub['velocity_cm_s'])
-        win_patch.set_x(lo_min)
-        win_patch.set_width(hi_min - lo_min)
+        # Window highlight on both histograms
+        win_patch_bouts.set_x(lo_min)
+        win_patch_bouts.set_width(hi_min - lo_min)
+        win_patch_speed.set_x(lo_min)
+        win_patch_speed.set_width(hi_min - lo_min)
 
         # Stats
         dur   = hi - lo

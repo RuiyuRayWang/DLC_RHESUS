@@ -461,7 +461,16 @@ class BBoxLabeler:
             print(f"Autosave: every {self.autosave_every} annotation changes")
 
     def _load_existing(self):
-        df = pd.read_csv(self.output_csv)
+        try:
+            df = pd.read_csv(self.output_csv)
+        except pd.errors.EmptyDataError:
+            print(f"Resume CSV is empty; starting fresh: {self.output_csv}")
+            return
+
+        if "video_frame" not in df.columns:
+            print(f"Resume CSV missing 'video_frame'; starting fresh: {self.output_csv}")
+            return
+
         loaded = 0
         for _, row in df.iterrows():
             fn = int(row["video_frame"])
@@ -751,6 +760,7 @@ class BBoxLabeler:
                 ann.visible = None
                 ann.bbox = None
                 self._note_annotation_change()
+                self._next_frame()
             elif key in (ord("m"),):
                 ann = self._current_ann()
                 ann.visible = False
@@ -841,7 +851,16 @@ class BBoxFrameLabeler:
             print(f"Autosave: every {self.autosave_every} annotation changes")
 
     def _load_existing(self):
-        df = pd.read_csv(self.output_csv)
+        try:
+            df = pd.read_csv(self.output_csv)
+        except pd.errors.EmptyDataError:
+            print(f"Resume CSV is empty; starting fresh: {self.output_csv}")
+            return
+
+        if "video_frame" not in df.columns:
+            print(f"Resume CSV missing 'video_frame'; starting fresh: {self.output_csv}")
+            return
+
         loaded = 0
         for _, row in df.iterrows():
             fn = int(row["video_frame"])
@@ -1144,6 +1163,7 @@ class BBoxFrameLabeler:
                 ann.visible = None
                 ann.bbox = None
                 self._note_annotation_change()
+                self._next_frame()
             elif key in (ord("m"),):
                 ann = self._current_ann()
                 ann.visible = False
@@ -1506,6 +1526,7 @@ class BBoxValidateLabeler:
                 self._prev_frame()
             elif key in (ord("u"),):
                 self._mark_current_no_detection()
+                self._next_frame()
             elif key in (ord("m"),):
                 self._mark_current_no_monkey()
                 self._next_frame()
@@ -1540,6 +1561,10 @@ def main():
 
     if args.scale <= 0:
         sys.exit("ERROR: --scale must be positive")
+
+    if args.mode == "annotate" and args.predictions_csv and not args.output:
+        print("[INFO] annotate mode: using --predictions-csv as output CSV path")
+        args.output = args.predictions_csv
 
     if args.mode == "annotate":
         if bool(args.video) == bool(args.frames_dir):
