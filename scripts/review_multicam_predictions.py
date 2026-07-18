@@ -33,8 +33,10 @@ Controls:
     - 0: clear all edit selections
     - I: toggle trajectory ignore-frame mask when mode 5 is active (press again to undo)
     - U: apply "no prediction" on all active cameras
+        - Mouse drag (single active camera): draw/adjust bbox in selected camera panel
   - H: hide/show bbox overlays
   - T: hide/show trajectory tail on arena
+    - A: toggle artifact-focus mode (artifact candidate frames only)
   - Q / ESC: quit
 
 Usage:
@@ -63,7 +65,11 @@ CAMERAS = ["D01", "D02", "D03", "D04"]
 FRAME_RE = re.compile(r"_f(\d+)$")
 TS_RE = re.compile(r"(?<!\d)(\d{14})(?!\d)")
 MASK_FILENAME = "trajectory_ignore_mask.csv"
+ARTIFACT_FILENAME = "trajectory_artifact_candidates.csv"
 FRAME_TIME_TOLERANCE_SEC = 0.08
+ARTIFACT_VEL_THRESH_DEFAULT = 300.0
+ARTIFACT_DVDT_THRESH_DEFAULT = 1500.0
+ARTIFACT_BRIDGE_MAX_SEC_DEFAULT = 8.0
 
 ARENA_SIZE_CM = 322.0
 PANEL_W = 800
@@ -78,6 +84,14 @@ C_WHITE = (245, 245, 245)
 C_GRAY = (180, 180, 180)
 C_BLACK = (20, 20, 20)
 C_BLUE = (220, 140, 60)
+
+
+def sidebar_time_input_rect(height: int) -> tuple[int, int, int, int]:
+    x0 = 14
+    x1 = SIDEBAR_W - 14
+    y0 = height - 208
+    y1 = height - 182
+    return x0, y0, x1, y1
 
 
 @dataclass
@@ -99,6 +113,21 @@ class Bundle:
     index: int
     entries: dict[str, list[CameraEntry]]
     timeline: list[datetime]
+
+
+@dataclass
+class PanelMeta:
+    panel_x0: int
+    panel_y0: int
+    image_h: int
+    img_x0: int
+    img_y0: int
+    img_w: int
+    img_h: int
+    scale: float
+    src_w: int
+    src_h: int
+    has_image: bool
 
 
 class TrajectoryIndex:
@@ -230,6 +259,104 @@ class TrajectoryIndex:
         t1 = pd.Timestamp(when)
         return self.visible_df[(self.visible_df["absolute_time"] >= t0) & (self.visible_df["absolute_time"] <= t1)]
 
+    def artifact_row_indices(self, velocity_thresh: float, dvdt_thresh: float, bridge_max_sec: float = ARTIFACT_BRIDGE_MAX_SEC_DEFAULT) -> set[int]:
+        if self.df.empty:
+            return set()
+
+        ts = self.df["absolute_time"].astype("int64").to_numpy(dtype=np.int64) / 1e9
+        dt = np.diff(ts, prepend=ts[0])
+
+        if "velocity_cm_s" in self.df.columns:
+            vel = pd.to_numeric(self.df["velocity_cm_s"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        elif "x_cm" in self.df.columns and "y_cm" in self.df.columns:
+            dx = pd.to_numeric(self.df["x_cm"], errors="coerce").diff().to_numpy(dtype=float)
+            dy = pd.to_numeric(self.df["y_cm"], errors="coerce").diff().to_numpy(dtype=float)
+            dist = np.sqrt(np.nan_to_num(dx, nan=0.0) ** 2 + np.nan_to_num(dy, nan=0.0) ** 2)
+            vel = np.divide(dist, dt, out=np.zeros_like(dist), where=np.abs(dt) > 1e-9)
+        else:
+            vel = np.zeros(len(self.df), dtype=float)
+
+        dvel = np.diff(vel, prepend=vel[0])
+        dvdt = np.divide(np.abs(dvel), dt, out=np.zeros_like(dvel), where=np.abs(dt) > 1e-9)
+        seed = (np.abs(vel) > float(velocity_thresh)) | (dvdt > float(dvdt_thresh))
+        artifact_mask = seed.copy()
+        seed_idx = np.flatnonzero(seed)
+        if len(seed_idx) >= 2:
+            for i in range(len(seed_idx) - 1):
+                a = int(seed_idx[i])
+                b = int(seed_idx[i + 1])
+                if b <= a:
+                    continue
+                gap_sec = float(ts[b] - ts[a])
+                if 0.0 < gap_sec <= float(bridge_max_sec):
+                    artifact_mask[a:b + 1] = True
+        idx = np.flatnonzero(artifact_mask)
+        return set(int(i) for i in idx)
+
+
+def build_artifact_tidx_map(
+    bundles: list[Bundle],
+    traj_index: TrajectoryIndex,
+    velocity_thresh: float,
+    dvdt_thresh: float,
+    bridge_max_sec: float,
+    artifact_csv_path: Optional[Path] = None,
+) -> dict[int, list[int]]:
+    out: dict[int, list[int]] = {}
+
+    if artifact_csv_path is not None and artifact_csv_path.exists():
+        try:
+            art = pd.read_csv(artifact_csv_path)
+        except Exception:
+            art = pd.DataFrame()
+
+        if not art.empty and 'absolute_time' in art.columns:
+            ats = pd.to_datetime(art['absolute_time'], errors='coerce').dropna()
+            if len(ats) > 0:
+                art_ns = np.unique(ats.astype('int64').to_numpy())
+                for bidx, bundle in enumerate(bundles):
+                    t_ns = np.array([pd.Timestamp(t).value for t in bundle.timeline], dtype=np.int64)
+                    if t_ns.size == 0:
+                        continue
+                    tids: list[int] = []
+                    for ns in art_ns:
+                        pos = int(np.searchsorted(t_ns, ns))
+                        cand = []
+                        if 0 <= pos < len(t_ns):
+                            cand.append(pos)
+                        if pos - 1 >= 0:
+                            cand.append(pos - 1)
+                        if not cand:
+                            continue
+                        idx = min(cand, key=lambda i: abs(t_ns[i] - ns))
+                        if abs(t_ns[idx] - ns) <= int(FRAME_TIME_TOLERANCE_SEC * 1e9):
+                            tids.append(int(idx))
+                    if tids:
+                        out[bidx] = sorted(set(tids))
+                return out
+
+    # Fallback for backward compatibility when precomputed artifact CSV is unavailable.
+    artifact_rows = traj_index.artifact_row_indices(
+        velocity_thresh=velocity_thresh,
+        dvdt_thresh=dvdt_thresh,
+        bridge_max_sec=bridge_max_sec,
+    )
+    if not artifact_rows:
+        return out
+
+    for bidx, bundle in enumerate(bundles):
+        tids: list[int] = []
+        for tidx, when in enumerate(bundle.timeline):
+            row, _ = traj_index.nearest_raw(when)
+            if row is None:
+                continue
+            ridx = int(row.get("_orig_idx", -1))
+            if ridx in artifact_rows:
+                tids.append(tidx)
+        if tids:
+            out[bidx] = sorted(set(tids))
+    return out
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Review synchronized 4-camera predictions with fused trajectory overlay")
@@ -240,6 +367,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--traj-root", type=Path, default=PROJECT_ROOT / "results" / "oft_analysis", help="Root for fused trajectories")
     parser.add_argument("--bundle-index", type=int, default=0, help="Which chronological 4-camera bundle to open")
     parser.add_argument("--fps", type=float, default=FPS_DEFAULT, help="Video FPS for absolute-time reconstruction")
+    parser.add_argument("--artifact-velocity-thresh", type=float, default=ARTIFACT_VEL_THRESH_DEFAULT, help="Velocity threshold (cm/s) for artifact candidates")
+    parser.add_argument("--artifact-dvdt-thresh", type=float, default=ARTIFACT_DVDT_THRESH_DEFAULT, help="|dV/dt| threshold (cm/s^2) for artifact candidates")
+    parser.add_argument("--artifact-bridge-max-sec", type=float, default=ARTIFACT_BRIDGE_MAX_SEC_DEFAULT, help="Bridge adjacent artifact edges to include sustained artifact intervals")
     return parser.parse_args()
 
 
@@ -516,6 +646,44 @@ def nearest_frame_for_time(bundle: Bundle, camera: str, when: datetime) -> tuple
     return best_entry, best_frame, best_dt
 
 
+def matching_frames_for_time(bundle: Bundle, camera: str, when: datetime) -> list[tuple[CameraEntry, int, float]]:
+    """Return per-clip nearest frame matches around an absolute time.
+
+    At clip boundaries, two clips can both be valid within tolerance; callers can
+    apply edits to all returned matches to avoid boundary leftovers.
+    """
+    t = when.timestamp()
+    matches: list[tuple[CameraEntry, int, float]] = []
+
+    for entry in bundle.entries[camera]:
+        times = entry.frame_times_sec
+        idxs = entry.frame_indices
+        if len(times) == 0:
+            continue
+
+        t0 = float(times[0])
+        t1 = float(times[-1])
+        if t < (t0 - FRAME_TIME_TOLERANCE_SEC) or t > (t1 + FRAME_TIME_TOLERANCE_SEC):
+            continue
+
+        pos = int(np.searchsorted(times, t))
+        cand = []
+        if 0 <= pos < len(times):
+            cand.append(pos)
+        if pos - 1 >= 0:
+            cand.append(pos - 1)
+        if not cand:
+            continue
+
+        best_local = min(cand, key=lambda i: abs(times[i] - t))
+        dt = float(abs(times[best_local] - t))
+        if dt <= FRAME_TIME_TOLERANCE_SEC:
+            matches.append((entry, int(idxs[best_local]), dt))
+
+    matches.sort(key=lambda x: x[2])
+    return matches
+
+
 def get_pred_row(entry: CameraEntry, frame_idx: int) -> Optional[pd.Series]:
     rows = entry.pred_df[entry.pred_df["video_frame"] == int(frame_idx)]
     if rows.empty:
@@ -531,7 +699,9 @@ def apply_prediction_edit(entry: CameraEntry, frame_idx: int, mode: str) -> bool
     had_rows = bool(mask.any())
 
     if had_rows:
-        entry.pred_df = entry.pred_df.loc[~mask].reset_index(drop=True)
+        if "has_detection" not in entry.pred_df.columns:
+            entry.pred_df["has_detection"] = False
+        entry.pred_df.loc[mask, "has_detection"] = False
         entry.pred_df.to_csv(entry.pred_csv, index=False)
         return True
     return False
@@ -598,6 +768,8 @@ def draw_arena_overlay(panel: np.ndarray, x_cm: Optional[float], y_cm: Optional[
 def make_sidebar(height: int, x_cm: Optional[float], y_cm: Optional[float], tail: Optional[pd.DataFrame],
                  abs_time: datetime, dt_sec: float, bundle_idx: int, time_idx: int, show_bbox: bool,
                  active_cameras: set[str], trajectory_mask_mode: bool,
+                 time_input_text: str, time_input_active: bool,
+                 artifact_mode: bool, artifact_pos: int, artifact_total: int,
                  velocity_cm_s: Optional[float], status_text: str,
                  raw_ignored: bool, raw_idx: Optional[int]) -> np.ndarray:
     panel = np.full((height, SIDEBAR_W, 3), 236, dtype=np.uint8)
@@ -607,27 +779,42 @@ def make_sidebar(height: int, x_cm: Optional[float], y_cm: Optional[float], tail
     cv2.putText(panel, f"bundle={bundle_idx}  t_idx={time_idx}", (14, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_GRAY, 1, cv2.LINE_AA)
     draw_arena_overlay(panel, x_cm, y_cm, tail)
 
+    tx0, ty0, tx1, ty1 = sidebar_time_input_rect(height)
+    cv2.putText(panel, "Jump to time (HH:MM:SS)", (tx0, ty0 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (38, 38, 38), 1, cv2.LINE_AA)
+    fill = (252, 252, 252) if not time_input_active else (232, 242, 255)
+    border = (150, 150, 150) if not time_input_active else (80, 140, 200)
+    cv2.rectangle(panel, (tx0, ty0), (tx1, ty1), fill, -1)
+    cv2.rectangle(panel, (tx0, ty0), (tx1, ty1), border, 1)
+    shown_text = time_input_text if time_input_text else "--:--:--"
+    shown_color = (30, 30, 30) if time_input_text else (140, 140, 140)
+    cv2.putText(panel, shown_text, (tx0 + 8, ty0 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.52, shown_color, 1, cv2.LINE_AA)
+
     y = height - 128
+    cv2.putText(panel, "Refresh trajectory (R)", (14, y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (28, 68, 112), 1, cv2.LINE_AA)
     cv2.putText(panel, abs_time.strftime("%Y-%m-%d %H:%M:%S"), (14, y), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_BLACK, 1, cv2.LINE_AA)
     dt_text = f"traj_dt={dt_sec:.2f}s" if np.isfinite(dt_sec) else "traj_dt=nan"
     cv2.putText(panel, dt_text, (14, y + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_BLACK, 1, cv2.LINE_AA)
     vel_text = f"velocity={velocity_cm_s:.2f} cm/s" if velocity_cm_s is not None and np.isfinite(velocity_cm_s) else "velocity=n/a"
     cv2.putText(panel, vel_text, (14, y + 44), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_BLACK, 1, cv2.LINE_AA)
     cv2.putText(panel, f"bbox overlays={'ON' if show_bbox else 'OFF'}", (14, y + 66), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_BLACK, 1, cv2.LINE_AA)
+    art_label = f"artifact focus={'ON' if artifact_mode else 'OFF'}"
+    if artifact_mode:
+        art_label += f" ({artifact_pos + 1}/{max(artifact_total, 1)})"
+    cv2.putText(panel, art_label, (14, y + 88), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (90, 60, 120) if artifact_mode else C_BLACK, 1, cv2.LINE_AA)
 
     edit_label = "none"
     if trajectory_mask_mode:
         edit_label = "trajectory-mask"
     elif active_cameras:
         edit_label = ",".join(sorted(active_cameras))
-    cv2.putText(panel, f"active edit: {edit_label}", (14, y + 88), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_BLACK, 1, cv2.LINE_AA)
+    cv2.putText(panel, f"active edit: {edit_label}", (14, y + 108), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_BLACK, 1, cv2.LINE_AA)
 
     state_text = "nearest traj row: n/a"
     state_color = (70, 70, 70)
     if raw_idx is not None:
         state_text = f"nearest traj row #{raw_idx}: {'IGNORED' if raw_ignored else 'ACTIVE'}"
         state_color = (40, 70, 170) if raw_ignored else (30, 130, 40)
-    cv2.putText(panel, state_text, (14, y + 110), cv2.FONT_HERSHEY_SIMPLEX, 0.50, state_color, 1, cv2.LINE_AA)
+    cv2.putText(panel, state_text, (14, y + 128), cv2.FONT_HERSHEY_SIMPLEX, 0.50, state_color, 1, cv2.LINE_AA)
 
     if status_text:
         cv2.rectangle(panel, (10, height - 36), (SIDEBAR_W - 10, height - 10), (220, 235, 248), -1)
@@ -636,10 +823,10 @@ def make_sidebar(height: int, x_cm: Optional[float], y_cm: Optional[float], tail
     return panel
 
 
-def resize_with_padding(img: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
+def resize_with_padding(img: np.ndarray, target_w: int, target_h: int) -> tuple[np.ndarray, int, int, int, int, float]:
     ih, iw = img.shape[:2]
     if ih == 0 or iw == 0:
-        return np.zeros((target_h, target_w, 3), dtype=np.uint8)
+        return np.zeros((target_h, target_w, 3), dtype=np.uint8), 0, 0, 0, 0, 1.0
     scale = min(target_w / iw, target_h / ih)
     nw, nh = int(iw * scale), int(ih * scale)
     resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
@@ -647,29 +834,42 @@ def resize_with_padding(img: np.ndarray, target_w: int, target_h: int) -> np.nda
     x0 = (target_w - nw) // 2
     y0 = (target_h - nh) // 2
     canvas[y0:y0 + nh, x0:x0 + nw] = resized
-    return canvas
+    return canvas, x0, y0, nw, nh, float(scale)
 
 
 def render_panel(entry: CameraEntry, frame_idx: Optional[int], show_bbox: bool, delta_t: Optional[float] = None,
-                 is_active: bool = False) -> np.ndarray:
+                 is_active: bool = False, panel_x0: int = 0, panel_y0: int = 0) -> tuple[np.ndarray, PanelMeta]:
     image_h = PANEL_H - PANEL_INFO_H
+    empty_meta = PanelMeta(
+        panel_x0=panel_x0,
+        panel_y0=panel_y0,
+        image_h=image_h,
+        img_x0=0,
+        img_y0=0,
+        img_w=0,
+        img_h=0,
+        scale=1.0,
+        src_w=0,
+        src_h=0,
+        has_image=False,
+    )
 
     if frame_idx is None:
         panel = np.full((PANEL_H, PANEL_W, 3), 18, dtype=np.uint8)
         cv2.putText(panel, f"{entry.camera}: no frame at this time", (20, image_h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_RED, 2, cv2.LINE_AA)
-        return panel
+        return panel, empty_meta
 
     path = entry.frame_map.get(frame_idx)
     if path is None:
         panel = np.full((PANEL_H, PANEL_W, 3), 18, dtype=np.uint8)
         cv2.putText(panel, f"{entry.camera}: missing frame {frame_idx}", (20, image_h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_RED, 2, cv2.LINE_AA)
-        return panel
+        return panel, empty_meta
 
     img = cv2.imread(str(path))
     if img is None:
         panel = np.full((PANEL_H, PANEL_W, 3), 18, dtype=np.uint8)
         cv2.putText(panel, f"{entry.camera}: unreadable frame", (20, image_h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.8, C_RED, 2, cv2.LINE_AA)
-        return panel
+        return panel, empty_meta
 
     row = get_pred_row(entry, frame_idx)
     box, is_det = row_to_box(row)
@@ -681,7 +881,8 @@ def render_panel(entry: CameraEntry, frame_idx: Optional[int], show_bbox: bool, 
         elif is_det:
             cv2.putText(img, "DETECTION FLAG w/o BOX", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, C_YELLOW, 2, cv2.LINE_AA)
 
-    image_panel = resize_with_padding(img, PANEL_W, image_h)
+    src_h, src_w = img.shape[:2]
+    image_panel, img_x0, img_y0, img_w, img_h, scale = resize_with_padding(img, PANEL_W, image_h)
     panel = np.full((PANEL_H, PANEL_W, 3), 18, dtype=np.uint8)
     panel[:image_h, :] = image_panel
     cv2.rectangle(panel, (0, image_h), (PANEL_W, PANEL_H), C_BLACK, -1)
@@ -691,7 +892,99 @@ def render_panel(entry: CameraEntry, frame_idx: Optional[int], show_bbox: bool, 
     dt_txt = f"  dt={delta_t:.3f}s" if delta_t is not None and np.isfinite(delta_t) else ""
     cv2.putText(panel, f"{entry.camera}  {entry.stem}", (12, image_h + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, C_WHITE, 1, cv2.LINE_AA)
     cv2.putText(panel, f"frame={frame_idx}  {status}{dt_txt}", (12, image_h + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.52, C_GRAY, 1, cv2.LINE_AA)
-    return panel
+    meta = PanelMeta(
+        panel_x0=panel_x0,
+        panel_y0=panel_y0,
+        image_h=image_h,
+        img_x0=img_x0,
+        img_y0=img_y0,
+        img_w=img_w,
+        img_h=img_h,
+        scale=scale,
+        src_w=src_w,
+        src_h=src_h,
+        has_image=True,
+    )
+    return panel, meta
+
+
+def point_to_camera(x: int, y: int) -> Optional[str]:
+    if x < 0 or y < 0 or x >= PANEL_W * 2 or y >= PANEL_H * 2:
+        return None
+    col = x // PANEL_W
+    row = y // PANEL_H
+    idx = int(row * 2 + col)
+    if 0 <= idx < len(CAMERAS):
+        return CAMERAS[idx]
+    return None
+
+
+def update_prediction_bbox(entry: CameraEntry, frame_idx: int, bbox: tuple[int, int, int, int]) -> bool:
+    x1, y1, x2, y2 = bbox
+    if x2 <= x1 or y2 <= y1:
+        return False
+
+    mask = entry.pred_df["video_frame"] == int(frame_idx)
+    has_rows = bool(mask.any())
+
+    if not has_rows:
+        new_row = {col: np.nan for col in entry.pred_df.columns}
+        new_row["video_frame"] = int(frame_idx)
+        entry.pred_df = pd.concat([entry.pred_df, pd.DataFrame([new_row])], ignore_index=True)
+        entry.pred_df = entry.pred_df.sort_values("video_frame").reset_index(drop=True)
+        mask = entry.pred_df["video_frame"] == int(frame_idx)
+
+    if "has_detection" in entry.pred_df.columns:
+        entry.pred_df.loc[mask, "has_detection"] = True
+    if "monkey_visible" in entry.pred_df.columns:
+        entry.pred_df.loc[mask, "monkey_visible"] = True
+
+    for col, val in (("bbox_x1", x1), ("bbox_y1", y1), ("bbox_x2", x2), ("bbox_y2", y2)):
+        if col in entry.pred_df.columns:
+            entry.pred_df.loc[mask, col] = float(val)
+
+    w = float(x2 - x1)
+    h = float(y2 - y1)
+    cx = float((x1 + x2) / 2.0)
+    cy = float((y1 + y2) / 2.0)
+    if "bbox_w" in entry.pred_df.columns:
+        entry.pred_df.loc[mask, "bbox_w"] = w
+    if "bbox_h" in entry.pred_df.columns:
+        entry.pred_df.loc[mask, "bbox_h"] = h
+    if "bbox_cx" in entry.pred_df.columns:
+        entry.pred_df.loc[mask, "bbox_cx"] = cx
+    if "bbox_cy" in entry.pred_df.columns:
+        entry.pred_df.loc[mask, "bbox_cy"] = cy
+
+    entry.pred_df.to_csv(entry.pred_csv, index=False)
+    return True
+
+
+def panel_points_to_bbox(start_xy: tuple[int, int], end_xy: tuple[int, int], meta: PanelMeta) -> Optional[tuple[int, int, int, int]]:
+    if not meta.has_image or meta.scale <= 0:
+        return None
+
+    def to_src(pxy: tuple[int, int]) -> tuple[int, int]:
+        gx, gy = pxy
+        lx = gx - meta.panel_x0
+        ly = gy - meta.panel_y0
+
+        lx = min(max(lx, meta.img_x0), meta.img_x0 + meta.img_w - 1)
+        ly = min(max(ly, meta.img_y0), meta.img_y0 + meta.img_h - 1)
+
+        sx = int(round((lx - meta.img_x0) / meta.scale))
+        sy = int(round((ly - meta.img_y0) / meta.scale))
+        sx = int(min(max(sx, 0), max(0, meta.src_w - 1)))
+        sy = int(min(max(sy, 0), max(0, meta.src_h - 1)))
+        return sx, sy
+
+    sx1, sy1 = to_src(start_xy)
+    sx2, sy2 = to_src(end_xy)
+    x1, x2 = sorted((sx1, sx2))
+    y1, y2 = sorted((sy1, sy2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2, y2)
 
 
 def resolve_time_context(bundle: Bundle, abs_time: datetime) -> dict[str, tuple[CameraEntry, Optional[int], float]]:
@@ -706,14 +999,23 @@ def resolve_time_context(bundle: Bundle, abs_time: datetime) -> dict[str, tuple[
 
 def make_canvas(bundle: Bundle, time_idx: int, show_bbox: bool, traj_index: TrajectoryIndex, show_tail: bool,
                 active_cameras: set[str], trajectory_mask_mode: bool,
-                status_text: str) -> tuple[np.ndarray, datetime, dict[str, tuple[CameraEntry, Optional[int], float]]]:
+                time_input_text: str, time_input_active: bool,
+                artifact_mode: bool, artifact_pos: int, artifact_total: int,
+                status_text: str) -> tuple[np.ndarray, datetime, dict[str, tuple[CameraEntry, Optional[int], float]], dict[str, PanelMeta]]:
     abs_time = bundle.timeline[time_idx]
     context = resolve_time_context(bundle, abs_time)
 
     panels = []
+    panel_meta: dict[str, PanelMeta] = {}
     for i, c in enumerate(CAMERAS, start=1):
         entry, frame_idx, dt = context[c]
-        panels.append(render_panel(entry, frame_idx, show_bbox, delta_t=dt, is_active=(c in active_cameras)))
+        row = (i - 1) // 2
+        col = (i - 1) % 2
+        px0 = col * PANEL_W
+        py0 = row * PANEL_H
+        panel_img, meta = render_panel(entry, frame_idx, show_bbox, delta_t=dt, is_active=(c in active_cameras), panel_x0=px0, panel_y0=py0)
+        panels.append(panel_img)
+        panel_meta[c] = meta
 
     top = np.hstack([panels[0], panels[1]])
     bot = np.hstack([panels[2], panels[3]])
@@ -744,19 +1046,36 @@ def make_canvas(bundle: Bundle, time_idx: int, show_bbox: bool, traj_index: Traj
         show_bbox=show_bbox,
         active_cameras=active_cameras,
         trajectory_mask_mode=trajectory_mask_mode,
+        time_input_text=time_input_text,
+        time_input_active=time_input_active,
+        artifact_mode=artifact_mode,
+        artifact_pos=artifact_pos,
+        artifact_total=artifact_total,
         velocity_cm_s=velocity_cm_s,
         status_text=status_text,
         raw_ignored=raw_ignored,
         raw_idx=raw_idx,
     )
     canvas = np.hstack([mosaic, sidebar])
-    return canvas, abs_time, context
+    return canvas, abs_time, context, panel_meta
 
 
-def run(monkey: str, date: str, frames_root: Path, pred_root: Path, traj_root: Path, bundle_index: int, fps: float) -> None:
+def run(
+    monkey: str,
+    date: str,
+    frames_root: Path,
+    pred_root: Path,
+    traj_root: Path,
+    bundle_index: int,
+    fps: float,
+    artifact_velocity_thresh: float,
+    artifact_dvdt_thresh: float,
+    artifact_bridge_max_sec: float,
+) -> None:
     frames_dir = frames_root / monkey / date
     pred_dir = pred_root / monkey / date
     traj_path = traj_root / monkey / date / "trajectory_realworld.csv"
+    artifact_csv_path = traj_path.parent / ARTIFACT_FILENAME
 
     if not frames_dir.exists():
         raise SystemExit(f"ERROR: frames dir not found: {frames_dir}")
@@ -770,6 +1089,14 @@ def run(monkey: str, date: str, frames_root: Path, pred_root: Path, traj_root: P
         raise SystemExit(f"ERROR: bundle-index out of range [0, {len(bundles)-1}]")
 
     traj_index = TrajectoryIndex(traj_path)
+    artifact_tidx_by_bundle = build_artifact_tidx_map(
+        bundles,
+        traj_index,
+        velocity_thresh=artifact_velocity_thresh,
+        dvdt_thresh=artifact_dvdt_thresh,
+        bridge_max_sec=artifact_bridge_max_sec,
+        artifact_csv_path=artifact_csv_path,
+    )
 
     show_bbox = True
     show_tail = True
@@ -781,14 +1108,123 @@ def run(monkey: str, date: str, frames_root: Path, pred_root: Path, traj_root: P
 
     win = "MultiCamPredictionReview"
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    ui_state = {
+        "refresh_requested": False,
+        "dragging": False,
+        "drag_cam": None,
+        "drag_start": None,
+        "drag_current": None,
+        "pending_draw": None,
+        "time_input_active": False,
+        "time_input_text": "",
+        "artifact_mode": False,
+        "artifact_pos": 0,
+    }
 
-    print("\nControls: N/P next-prev frame, J/K jump -/+10, B/M prev-next bundle, H bbox toggle, T tail toggle, Q quit")
+    def current_artifact_list() -> list[int]:
+        return artifact_tidx_by_bundle.get(bidx, [])
+
+    def sync_artifact_cursor_from_tidx() -> None:
+        if not ui_state["artifact_mode"]:
+            return
+        art = current_artifact_list()
+        if not art:
+            return
+        ui_state["artifact_pos"] = int(min(range(len(art)), key=lambda i: abs(art[i] - tidx)))
+
+    def sync_tidx_to_artifact_mode() -> None:
+        nonlocal tidx
+        if not ui_state["artifact_mode"]:
+            return
+        art = current_artifact_list()
+        if not art:
+            return
+        ui_state["artifact_pos"] = max(0, min(ui_state["artifact_pos"], len(art) - 1))
+        tidx = int(art[ui_state["artifact_pos"]])
+
+    def move_timeline(delta: int) -> None:
+        nonlocal tidx
+        if ui_state["artifact_mode"]:
+            art = current_artifact_list()
+            if art:
+                ui_state["artifact_pos"] = max(0, min(ui_state["artifact_pos"] + delta, len(art) - 1))
+                tidx = int(art[ui_state["artifact_pos"]])
+                return
+        tidx = max(0, min(tidx + delta, len(bundles[bidx].timeline) - 1))
+
+    def normalize_hms_text(text: str) -> str:
+        chars = [c for c in text if c.isdigit()]
+        chars = chars[:6]
+        if len(chars) <= 2:
+            return "".join(chars)
+        if len(chars) <= 4:
+            return f"{''.join(chars[:2])}:{''.join(chars[2:])}"
+        return f"{''.join(chars[:2])}:{''.join(chars[2:4])}:{''.join(chars[4:])}"
+
+    def seek_tidx_by_hms(bundle: Bundle, current_abs_time: datetime, hms_text: str) -> tuple[Optional[int], str]:
+        if not re.fullmatch(r"\d{2}:\d{2}:\d{2}", hms_text):
+            return None, "invalid time; use HH:MM:SS"
+        try:
+            hh, mm, ss = [int(v) for v in hms_text.split(":")]
+            target_dt = current_abs_time.replace(hour=hh, minute=mm, second=ss, microsecond=0)
+        except Exception:
+            return None, "invalid time components"
+
+        ts = np.array([dt.timestamp() for dt in bundle.timeline], dtype=np.float64)
+        if ts.size == 0:
+            return None, "empty timeline"
+        t = target_dt.timestamp()
+        pos = int(np.searchsorted(ts, t))
+        cand = []
+        if 0 <= pos < len(ts):
+            cand.append(pos)
+        if pos - 1 >= 0:
+            cand.append(pos - 1)
+        if not cand:
+            return None, "seek failed"
+        idx = min(cand, key=lambda i: abs(ts[i] - t))
+        return int(idx), f"jumped to {bundle.timeline[idx].strftime('%H:%M:%S')}"
+
+    def on_mouse(event: int, x: int, y: int, flags: int, userdata) -> None:
+        if x >= PANEL_W * 2:
+            x_rel = x - PANEL_W * 2
+            tx0, ty0, tx1, ty1 = sidebar_time_input_rect(PANEL_H * 2)
+            if event == cv2.EVENT_LBUTTONDOWN:
+                ui_state["time_input_active"] = (tx0 <= x_rel <= tx1 and ty0 <= y <= ty1)
+            return
+
+        if trajectory_mask_mode:
+            return
+
+        if event == cv2.EVENT_LBUTTONDOWN:
+            cam = point_to_camera(x, y)
+            if cam is None:
+                return
+            if len(active_cameras) != 1 or cam not in active_cameras:
+                return
+            ui_state["dragging"] = True
+            ui_state["drag_cam"] = cam
+            ui_state["drag_start"] = (x, y)
+            ui_state["drag_current"] = (x, y)
+        elif event == cv2.EVENT_MOUSEMOVE and ui_state["dragging"]:
+            ui_state["drag_current"] = (x, y)
+        elif event == cv2.EVENT_LBUTTONUP and ui_state["dragging"]:
+            ui_state["dragging"] = False
+            ui_state["drag_current"] = (x, y)
+            ui_state["pending_draw"] = (ui_state["drag_cam"], ui_state["drag_start"], ui_state["drag_current"])
+            ui_state["drag_cam"] = None
+
+    cv2.setMouseCallback(win, on_mouse)
+
+    print("\nControls: N/P next-prev frame, J/K jump -/+10, B/M prev-next bundle, H bbox toggle, T tail toggle, R refresh trajectory, A artifact focus, Q quit")
     print("Edit: 1/2/3/4 toggle D01..D04 (multi-select), 5 toggle trajectory mask, 0 clear all, I toggle mask (mode 5), U no-prediction (all selected cameras)")
 
     while True:
         bundle = bundles[bidx]
+        sync_tidx_to_artifact_mode()
+        art_list = current_artifact_list() if ui_state["artifact_mode"] else []
 
-        canvas, abs_time, context = make_canvas(
+        canvas, abs_time, context, panel_meta = make_canvas(
             bundle,
             tidx,
             show_bbox,
@@ -796,14 +1232,80 @@ def run(monkey: str, date: str, frames_root: Path, pred_root: Path, traj_root: P
             show_tail,
             active_cameras,
             trajectory_mask_mode,
+            ui_state["time_input_text"],
+            ui_state["time_input_active"],
+            ui_state["artifact_mode"],
+            ui_state["artifact_pos"],
+            len(art_list),
             status_text,
         )
+
+        if ui_state["dragging"] and ui_state["drag_start"] is not None and ui_state["drag_current"] is not None:
+            x1, y1 = ui_state["drag_start"]
+            x2, y2 = ui_state["drag_current"]
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), (255, 180, 0), 2)
+
         cv2.imshow(win, canvas)
         key = cv2.waitKey(30) & 0xFF
         status_text = ""
 
+        if ui_state["time_input_active"]:
+            if key in (13, 10):
+                idx, msg = seek_tidx_by_hms(bundle, abs_time, ui_state["time_input_text"])
+                status_text = msg
+                if idx is not None:
+                    tidx = idx
+                    sync_artifact_cursor_from_tidx()
+                ui_state["time_input_active"] = False
+            elif key == 27:
+                ui_state["time_input_active"] = False
+            elif key in (8, 127):
+                ui_state["time_input_text"] = normalize_hms_text(ui_state["time_input_text"][:-1])
+            elif 32 <= key <= 126:
+                ch = chr(key)
+                if ch.isdigit() or ch == ":":
+                    ui_state["time_input_text"] = normalize_hms_text(ui_state["time_input_text"] + ch)
+            continue
+
+        if ui_state["pending_draw"] is not None:
+            cam, start_xy, end_xy = ui_state["pending_draw"]
+            ui_state["pending_draw"] = None
+            if cam not in context:
+                status_text = "bbox draw failed: camera not in context"
+            elif cam not in panel_meta:
+                status_text = f"{cam}: bbox draw unavailable"
+            else:
+                entry, frame_idx, _ = context[cam]
+                if frame_idx is None:
+                    status_text = f"{cam}: no frame to edit"
+                else:
+                    bbox = panel_points_to_bbox(start_xy, end_xy, panel_meta[cam])
+                    if bbox is None:
+                        status_text = f"{cam}: bbox too small"
+                    else:
+                        ok = update_prediction_bbox(entry, frame_idx, bbox)
+                        if ok:
+                            status_text = f"{cam}: bbox updated @ frame {frame_idx}"
+                        else:
+                            status_text = f"{cam}: bbox update failed"
+
         if key in (ord("q"), 27):
             break
+        elif key in (ord("a"), ord("A")):
+            ui_state["artifact_mode"] = not ui_state["artifact_mode"]
+            if ui_state["artifact_mode"]:
+                art = current_artifact_list()
+                if not art:
+                    ui_state["artifact_mode"] = False
+                    status_text = "artifact focus: none in this bundle"
+                else:
+                    sync_artifact_cursor_from_tidx()
+                    sync_tidx_to_artifact_mode()
+                    status_text = f"artifact focus ON ({len(art)} frames)"
+            else:
+                status_text = "artifact focus OFF"
+        elif key in (ord("r"), ord("R")):
+            ui_state["refresh_requested"] = True
         elif key == ord("0"):
             active_cameras.clear()
             trajectory_mask_mode = False
@@ -825,13 +1327,13 @@ def run(monkey: str, date: str, frames_root: Path, pred_root: Path, traj_root: P
             else:
                 status_text = "trajectory mask mode off"
         elif key in (ord("n"), 83):
-            tidx = min(len(bundle.timeline) - 1, tidx + 1)
+            move_timeline(+1)
         elif key in (ord("p"), 81):
-            tidx = max(0, tidx - 1)
+            move_timeline(-1)
         elif key == ord("k"):
-            tidx = min(len(bundle.timeline) - 1, tidx + 10)
+            move_timeline(+10)
         elif key == ord("j"):
-            tidx = max(0, tidx - 10)
+            move_timeline(-10)
         elif key in (ord("i"), ord("I")):
             if trajectory_mask_mode:
                 ok, now_ignored = traj_index.toggle_ignore_at_time(abs_time)
@@ -839,24 +1341,29 @@ def run(monkey: str, date: str, frames_root: Path, pred_root: Path, traj_root: P
                     status_text = "trajectory frame masked (pending save)" if now_ignored else "trajectory frame unmasked (pending save)"
                 else:
                     status_text = "trajectory mask toggle failed"
-                tidx = min(len(bundle.timeline) - 1, tidx + 1)
+                move_timeline(+1)
             else:
                 status_text = "select 5 to use trajectory mask"
-        elif key == ord("u"):
+        elif key in (ord("u"), ord("U")):
             if active_cameras:
                 results = []
                 for cam in sorted(active_cameras):
-                    entry, frame_idx, _ = context[cam]
-                    if frame_idx is None:
+                    matches = matching_frames_for_time(bundle, cam, abs_time)
+                    if not matches:
                         results.append(f"{cam}:no-frame")
                         continue
-                    ok = apply_prediction_edit(entry, frame_idx, mode="no_prediction")
-                    if ok:
-                        results.append(f"{cam}:ok")
+
+                    applied = 0
+                    for entry, frame_idx, _ in matches:
+                        if apply_prediction_edit(entry, frame_idx, mode="no_prediction"):
+                            applied += 1
+
+                    if applied > 0:
+                        results.append(f"{cam}:okx{applied}")
                     else:
                         results.append(f"{cam}:none")
                 status_text = "U -> " + ", ".join(results)
-                tidx = min(len(bundle.timeline) - 1, tidx + 1)
+                move_timeline(+1)
             elif trajectory_mask_mode:
                 status_text = "U is reserved for camera no-prediction"
             else:
@@ -869,10 +1376,58 @@ def run(monkey: str, date: str, frames_root: Path, pred_root: Path, traj_root: P
             if bidx < len(bundles) - 1:
                 bidx += 1
                 tidx = 0
+                ui_state["artifact_pos"] = 0
+                if ui_state["artifact_mode"]:
+                    art = current_artifact_list()
+                    if art:
+                        sync_tidx_to_artifact_mode()
+                    else:
+                        ui_state["artifact_mode"] = False
+                        status_text = "artifact focus OFF (no artifacts in bundle)"
         elif key == ord("b"):
             if bidx > 0:
                 bidx -= 1
                 tidx = 0
+                ui_state["artifact_pos"] = 0
+                if ui_state["artifact_mode"]:
+                    art = current_artifact_list()
+                    if art:
+                        sync_tidx_to_artifact_mode()
+                    else:
+                        ui_state["artifact_mode"] = False
+                        status_text = "artifact focus OFF (no artifacts in bundle)"
+
+        if ui_state["refresh_requested"]:
+            traj_index.save_if_dirty()
+            try:
+                bundles = build_bundles(pred_dir=pred_dir, frames_dir=frames_dir, fps=fps)
+                if not bundles:
+                    raise RuntimeError("no synchronized bundles found")
+                bidx = max(0, min(bidx, len(bundles) - 1))
+                tidx = max(0, min(tidx, len(bundles[bidx].timeline) - 1))
+                traj_index = TrajectoryIndex(traj_path)
+                artifact_tidx_by_bundle = build_artifact_tidx_map(
+                    bundles,
+                    traj_index,
+                    velocity_thresh=artifact_velocity_thresh,
+                    dvdt_thresh=artifact_dvdt_thresh,
+                    bridge_max_sec=artifact_bridge_max_sec,
+                    artifact_csv_path=artifact_csv_path,
+                )
+                if ui_state["artifact_mode"]:
+                    art = current_artifact_list()
+                    if art:
+                        sync_artifact_cursor_from_tidx()
+                        sync_tidx_to_artifact_mode()
+                    else:
+                        ui_state["artifact_mode"] = False
+                        status_text = "trajectory + overlays reloaded; artifact focus OFF"
+                        ui_state["refresh_requested"] = False
+                        continue
+                status_text = "trajectory + overlays reloaded"
+            except Exception as e:
+                status_text = f"refresh load failed: {str(e)[:64]}"
+            ui_state["refresh_requested"] = False
 
     traj_index.save_if_dirty()
     cv2.destroyAllWindows()
@@ -890,6 +1445,9 @@ def main() -> None:
         traj_root=args.traj_root.expanduser().resolve(),
         bundle_index=args.bundle_index,
         fps=float(args.fps),
+        artifact_velocity_thresh=float(args.artifact_velocity_thresh),
+        artifact_dvdt_thresh=float(args.artifact_dvdt_thresh),
+        artifact_bridge_max_sec=float(args.artifact_bridge_max_sec),
     )
 
 

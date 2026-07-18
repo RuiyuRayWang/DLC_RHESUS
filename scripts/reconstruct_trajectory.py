@@ -58,6 +58,9 @@ QUADRANT_BOUNDARY_MARGIN_CM = 15.0
 ARENA_EDGE_MARGIN_CM = 10.0
 VELOCITY_THRESHOLD = 8.0
 MIN_BOUT_DURATION = 0.5
+ARTIFACT_VEL_THRESH_DEFAULT = 300.0
+ARTIFACT_DVDT_THRESH_DEFAULT = 1500.0
+ARTIFACT_BRIDGE_MAX_SEC_DEFAULT = 8.0
 NO_MONKEY_SENTINEL = -1
 
 PRED_TS_RE = re.compile(r'^(D0[1-4])_(\d{14})_.*_preds\.csv$', re.IGNORECASE)
@@ -520,6 +523,47 @@ def compute_summary(traj: pd.DataFrame, bouts: pd.DataFrame) -> dict:
     }
 
 
+def detect_artifact_candidates(traj: pd.DataFrame,
+                               velocity_thresh: float = ARTIFACT_VEL_THRESH_DEFAULT,
+                               dvdt_thresh: float = ARTIFACT_DVDT_THRESH_DEFAULT,
+                               bridge_max_sec: float = ARTIFACT_BRIDGE_MAX_SEC_DEFAULT) -> pd.DataFrame:
+    if traj.empty:
+        return pd.DataFrame(columns=['row_index', 'absolute_time', 'time_sec', 'velocity_cm_s', 'dvdt_cm_s2', 'is_artifact'])
+
+    out = traj[['absolute_time', 'time_sec']].copy()
+    if 'velocity_cm_s' in traj.columns:
+        vel = pd.to_numeric(traj['velocity_cm_s'], errors='coerce').fillna(0.0).to_numpy(dtype=float)
+    else:
+        vel = np.zeros(len(traj), dtype=float)
+
+    t = pd.to_numeric(traj['time_sec'], errors='coerce').fillna(0.0).to_numpy(dtype=float)
+    dt = np.diff(t, prepend=t[0])
+    dvel = np.diff(vel, prepend=vel[0])
+    dvdt = np.divide(np.abs(dvel), dt, out=np.zeros_like(dvel), where=np.abs(dt) > 1e-9)
+
+    out['velocity_cm_s'] = vel
+    out['dvdt_cm_s2'] = dvdt
+    seed = (np.abs(vel) > float(velocity_thresh)) | (dvdt > float(dvdt_thresh))
+    artifact_mask = seed.copy()
+
+    # Bridge sustained artifact plateaus between abrupt artifact edges.
+    seed_idx = np.flatnonzero(seed)
+    if len(seed_idx) >= 2 and bridge_max_sec > 0:
+        for i in range(len(seed_idx) - 1):
+            a = int(seed_idx[i])
+            b = int(seed_idx[i + 1])
+            if b <= a:
+                continue
+            gap_sec = float(t[b] - t[a])
+            if 0.0 < gap_sec <= float(bridge_max_sec):
+                artifact_mask[a:b + 1] = True
+
+    out['is_artifact'] = artifact_mask
+
+    out = out.loc[out['is_artifact']].copy().reset_index().rename(columns={'index': 'row_index'})
+    return out
+
+
 # ── Main prediction pipeline ──────────────────────────────────────────────────
 
 def reconstruct_predictions(monkey_id: str = MONKEY_ID,
@@ -527,6 +571,9 @@ def reconstruct_predictions(monkey_id: str = MONKEY_ID,
                             cameras: List[str] = None,
                             fps: float = FPS,
                             max_interp: int = MAX_INTERP_FRAMES,
+                            artifact_velocity_thresh: float = ARTIFACT_VEL_THRESH_DEFAULT,
+                            artifact_dvdt_thresh: float = ARTIFACT_DVDT_THRESH_DEFAULT,
+                            artifact_bridge_max_sec: float = ARTIFACT_BRIDGE_MAX_SEC_DEFAULT,
                             cal_dir: Optional[Path] = None,
                             predictions_dir: Optional[Path] = None,
                             stereo_calib_json: Optional[Path] = None,
@@ -591,14 +638,22 @@ def reconstruct_predictions(monkey_id: str = MONKEY_ID,
     print('\n── Computing kinematics ──')
     traj = compute_kinematics(traj)
     bouts = detect_bouts(traj)
+    artifact_df = detect_artifact_candidates(
+        traj,
+        velocity_thresh=artifact_velocity_thresh,
+        dvdt_thresh=artifact_dvdt_thresh,
+        bridge_max_sec=artifact_bridge_max_sec,
+    )
     summary = compute_summary(traj, bouts)
 
     traj_path = output_dir / 'trajectory_realworld.csv'
     bouts_path = output_dir / 'movement_bouts.csv'
     summ_path = output_dir / 'trajectory_summary.json'
+    artifact_path = output_dir / 'trajectory_artifact_candidates.csv'
 
     traj.to_csv(traj_path, index=False)
     bouts.to_csv(bouts_path, index=False)
+    artifact_df.to_csv(artifact_path, index=False)
     with open(summ_path, 'w') as f:
         json.dump(summary, f, indent=2)
 
@@ -609,6 +664,7 @@ def reconstruct_predictions(monkey_id: str = MONKEY_ID,
         print(f'  {k:<35} {v}')
     print(f"\n✅  trajectory_realworld.csv  → {traj_path}")
     print(f'    movement_bouts.csv        → {bouts_path}')
+    print(f'    trajectory_artifact_candidates.csv → {artifact_path} ({len(artifact_df)} rows)')
     print(f'    trajectory_summary.json   → {summ_path}')
 
     return traj
@@ -629,6 +685,12 @@ def main() -> None:
     parser.add_argument('--fps', type=float, default=FPS)
     parser.add_argument('--max-interp', type=int, default=MAX_INTERP_FRAMES,
                         help='Max gap in frames to interpolate (default: 40 = 2s)')
+    parser.add_argument('--artifact-velocity-thresh', type=float, default=ARTIFACT_VEL_THRESH_DEFAULT,
+                        help='Velocity threshold (cm/s) for artifact-candidate export')
+    parser.add_argument('--artifact-dvdt-thresh', type=float, default=ARTIFACT_DVDT_THRESH_DEFAULT,
+                        help='|dV/dt| threshold (cm/s^2) for artifact-candidate export')
+    parser.add_argument('--artifact-bridge-max-sec', type=float, default=ARTIFACT_BRIDGE_MAX_SEC_DEFAULT,
+                        help='Bridge adjacent artifact edge events to include sustained artifact intervals')
     parser.add_argument('--cal-dir', default=None,
                         help=f'Calibration dir (default: {CAL_BASE})')
     parser.add_argument('--stereo-calibration-json', default=None,
@@ -651,6 +713,9 @@ def main() -> None:
         cameras=args.cameras,
         fps=args.fps,
         max_interp=args.max_interp,
+        artifact_velocity_thresh=args.artifact_velocity_thresh,
+        artifact_dvdt_thresh=args.artifact_dvdt_thresh,
+        artifact_bridge_max_sec=args.artifact_bridge_max_sec,
         cal_dir=Path(args.cal_dir) if args.cal_dir else None,
         predictions_dir=Path(args.predictions_dir) if args.predictions_dir else None,
         stereo_calib_json=Path(args.stereo_calibration_json) if args.stereo_calibration_json else None,

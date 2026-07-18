@@ -7,9 +7,9 @@ For rows selected by rules, this script sets:
     - bbox and confidence/class fields to empty values
 
 Rule semantics are applied to a configurable frame axis:
-    - row_index (default): uses CSV row index (sampled-frame order)
+    - video_frame (default): uses raw `video_frame`
+    - row_index: uses CSV row index (sampled-frame order)
     - sampled_frame: uses video_frame / --sampled-frame-scale
-    - video_frame: uses raw `video_frame`
 
 Cutoff behavior:
     - before:N  -> rows with axis_value < N are forced to no-detection
@@ -74,10 +74,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cutoff-unit",
         choices=["sampled_frame", "video_frame", "row_index"],
-        default="row_index",
+        default="video_frame",
         help=(
             "Axis used to interpret rule cutoffs. "
-            "row_index uses sampled-row order (default)."
+            "video_frame (default) is robust to prior row deletions."
         ),
     )
     parser.add_argument(
