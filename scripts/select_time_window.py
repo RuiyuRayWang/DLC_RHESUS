@@ -21,7 +21,8 @@ Output:
       "end_sec": ...,
       "start_abs": "...",
       "end_abs": "...",
-      "duration_sec": ...
+            "duration_sec": ...,
+            "avg_distance_cm_per_hour": ...  # computed over entire recording period
     }
 
 Usage:
@@ -148,6 +149,9 @@ def run(monkey_id: str, session_date: str):
     t_min  = traj['time_sec'].min()
     t_max  = traj['time_sec'].max()
     t_span = t_max - t_min
+    session_duration_sec = float(max(0.0, t_span))
+    session_distance_cm = float(traj['distance_cm'].sum()) if 'distance_cm' in traj.columns else 0.0
+    session_avg_distance_cm_per_hour = (session_distance_cm / session_duration_sec * 3600.0) if session_duration_sec > 0 else 0.0
 
     # ── Layout ─────────────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(15, 10.5))
@@ -324,6 +328,7 @@ def run(monkey_id: str, session_date: str):
             f"Window:  {t0}  →  {t1}\n"
             f"Duration:  {dur:.0f} s  ({dur/60:.1f} min)\n"
             f"Distance:  {dist/100:.1f} m ({dist:.0f} cm)\n"
+            f"Session avg distance per hour:  {session_avg_distance_cm_per_hour/100:.1f} m/h ({session_avg_distance_cm_per_hour:.1f} cm/h)\n"
             f"Max velocity:  {max_vel:.2f} cm/s\n"
             f"Movement bouts:  {len(bouts)}\n"
             f"Mean bout duration:  {mean_bout_duration:.2f} s\n"
@@ -400,6 +405,7 @@ def run(monkey_id: str, session_date: str):
             'duration_sec': round(hi - lo, 3),
             'mean_velocity_moving_cm_s': round(mean_velocity_moving, 3),
             'distance_cm':  round(float(sub['distance_cm'].sum()), 2) if not sub.empty else 0.0,
+            'avg_distance_cm_per_hour': round(session_avg_distance_cm_per_hour, 3),
             'max_velocity_cm_s': round(float(sub['velocity_cm_s'].max()), 3) if not sub.empty else 0.0,
             'n_movement_bouts': int(len(bouts)),
             'mean_bout_duration_sec': round(float(bouts['duration_sec'].mean()), 3) if len(bouts) > 0 else 0.0,
